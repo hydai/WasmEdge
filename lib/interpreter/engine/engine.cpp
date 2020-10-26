@@ -5,6 +5,9 @@
 #include "common/value.h"
 #include "interpreter/interpreter.h"
 
+#include <atomic>
+#include <mutex>
+
 namespace WasmEdge {
 namespace Interpreter {
 

@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
+#define ELPP_THREAD_SAFE
 #include "easyloggingpp/easylogging++.h"
 
 namespace WasmEdge {

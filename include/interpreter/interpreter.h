@@ -86,15 +86,14 @@ public:
   Interpreter(const Configure &Conf,
               Statistics::Statistics *S = nullptr) noexcept
       : Conf(Conf), Stat(S) {
-    assert(This == nullptr);
-    This = this;
+    InstanceIncrease();
     if (Stat) {
       ExecutionContext.InstrCount = &Stat->getInstrCountRef();
       ExecutionContext.CostTable = Stat->getCostTable().data();
       ExecutionContext.Gas = &Stat->getTotalCostRef();
     }
   }
-  ~Interpreter() noexcept { This = nullptr; }
+  ~Interpreter() noexcept { InstanceDecrease(); }
 
   /// Instantiate Wasm Module as the anonymous active module.
   Expect<void> instantiateModule(Runtime::StoreManager &StoreMgr,
@@ -472,8 +471,6 @@ private:
   template <typename T> Expect<void> runVectorNearestOp(ValVariant &Val) const;
   /// @}
 
-  /// \name Run compiled functions
-  /// @{
 public:
   Expect<void> trap(Runtime::StoreManager &StoreMgr,
                     const uint8_t Code) noexcept;
@@ -525,25 +522,24 @@ public:
   Expect<RefVariant> refFunc(Runtime::StoreManager &StoreMgr,
                              const uint32_t FuncIndex) noexcept;
 
-  static void signalEnable() noexcept;
-  static void signalDisable() noexcept;
-  static void signalHandler(int Signal, siginfo_t *Siginfo, void *) noexcept;
-  struct SignalEnabler {
-    SignalEnabler() noexcept { Interpreter::signalEnable(); }
-    ~SignalEnabler() noexcept { Interpreter::signalDisable(); }
-  };
+  static void InstanceIncrease();
+  static void InstanceDecrease();
 
-  struct SignalDisabler {
-    SignalDisabler() noexcept { Interpreter::signalDisable(); }
-    ~SignalDisabler() noexcept { Interpreter::signalEnable(); }
-  };
+  void enterCompiledContext() noexcept;
+  void leaveCompiledContext() noexcept;
+
+  static void signalHandler(int Signal, siginfo_t *Siginfo, void *) noexcept;
+  struct CompiledContext;
+  struct HostContext;
   template <typename FuncPtr> struct ProxyHelper;
 
 private:
+  /// \name Run compiled functions
+  /// @{
   /// Pointer to current object.
-  static Interpreter *This;
+  static thread_local Interpreter *This;
   /// jmp_buf for trap.
-  static sigjmp_buf *TrapJump;
+  sigjmp_buf *TrapJump;
   /// Store for passing into compiled functions
   Runtime::StoreManager *CurrentStore;
   /// Execution context for compiled functions

@@ -2,8 +2,6 @@
 #include "common/errinfo.h"
 #include "common/hexstr.h"
 
-#include "easyloggingpp/easylogging++.h"
-
 INITIALIZE_EASYLOGGINGPP
 
 namespace WasmEdge {
