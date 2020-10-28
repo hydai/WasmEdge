@@ -18,6 +18,7 @@
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
+#include <llvm/Transforms/Instrumentation/AddressSanitizer.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <numeric>
 
@@ -96,6 +97,9 @@ static inline constexpr const bool kForceDivCheck = true;
 
 /// Size of a ValVariant
 static inline constexpr const uint32_t kValSize = sizeof(WasmEdge::ValVariant);
+
+/// enable address sanitizer
+static inline constexpr const bool kEnableAddressSanitizer = false;
 
 /// Translate Compiler::OptimizationLevel to llvm::PassBuilder version
 static inline llvm::PassBuilder::OptimizationLevel
@@ -237,6 +241,9 @@ struct WasmEdge::AOT::Compiler::CompileContext {
     Trap->addFnAttr(llvm::Attribute::NoReturn);
     Trap->addFnAttr(llvm::Attribute::Cold);
     Trap->addFnAttr(llvm::Attribute::NoInline);
+    if constexpr (kEnableAddressSanitizer) {
+      Trap->addFnAttr(llvm::Attribute::SanitizeAddress);
+    }
 
     new llvm::GlobalVariable(
         LLModule, Int32Ty, true, llvm::GlobalValue::ExternalLinkage,
@@ -3892,7 +3899,41 @@ Expect<void> Compiler::compile(Span<const Byte> Data, const AST::Module &Module,
       llvm::ModulePassManager MPM(false);
       if (optNone()) {
         MPM.addPass(llvm::AlwaysInlinerPass(false));
+        if constexpr (kEnableAddressSanitizer) {
+          MPM.addPass(
+              llvm::RequireAnalysisPass<llvm::ASanGlobalsMetadataAnalysis,
+                                        llvm::Module>());
+          MPM.addPass(llvm::createModuleToFunctionPassAdaptor(
+              llvm::AddressSanitizerPass(false, false, false)));
+          MPM.addPass(
+              llvm::ModuleAddressSanitizerPass(false, false, true, false));
+        }
       } else {
+        if constexpr (kEnableAddressSanitizer) {
+          PB.registerPipelineStartEPCallback([&](llvm::ModulePassManager &MPM) {
+            MPM.addPass(
+                llvm::RequireAnalysisPass<llvm::ASanGlobalsMetadataAnalysis,
+                                          llvm::Module>());
+          });
+          PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR <= 10
+              [](llvm::FunctionPassManager &FPM,
+                 llvm::PassBuilder::OptimizationLevel Level) {
+                FPM.addPass(llvm::AddressSanitizerPass(false, false, false));
+              }
+#else
+              [](llvm::ModulePassManager &MPM,
+                 llvm::PassBuilder::OptimizationLevel Level) {
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(
+                    llvm::AddressSanitizerPass(false, false, false)));
+              }
+#endif
+          );
+          PB.registerPipelineStartEPCallback([](llvm::ModulePassManager &MPM) {
+            MPM.addPass(
+                llvm::ModuleAddressSanitizerPass(false, false, true, false));
+          });
+        }
         MPM.addPass(PB.buildPerModuleDefaultPipeline(toLLVMLevel(Level)));
       }
 
@@ -3996,6 +4037,9 @@ void Compiler::compile(const AST::TypeSection &TypeSection) {
         "t" + std::to_string(Context->FunctionTypes.size()), Context->LLModule);
     {
       F->addFnAttr(llvm::Attribute::StrictFP);
+      if constexpr (kEnableAddressSanitizer) {
+        F->addFnAttr(llvm::Attribute::SanitizeAddress);
+      }
       F->addParamAttr(0, llvm::Attribute::AttrKind::ReadOnly);
       F->addParamAttr(0, llvm::Attribute::AttrKind::NoAlias);
       F->addParamAttr(1, llvm::Attribute::AttrKind::NoAlias);
@@ -4083,6 +4127,9 @@ void Compiler::compile(const AST::ImportSection &ImportSec) {
                                        "f" + std::to_string(FuncID),
                                        Context->LLModule);
       F->addFnAttr(llvm::Attribute::StrictFP);
+      if constexpr (kEnableAddressSanitizer) {
+        F->addFnAttr(llvm::Attribute::SanitizeAddress);
+      }
       F->addParamAttr(0, llvm::Attribute::AttrKind::ReadOnly);
       F->addParamAttr(0, llvm::Attribute::AttrKind::NoAlias);
 
@@ -4225,6 +4272,9 @@ void Compiler::compile(const AST::FunctionSection &FuncSec,
         llvm::Function::Create(FTy, llvm::Function::InternalLinkage,
                                "f" + std::to_string(FuncID), Context->LLModule);
     F->addFnAttr(llvm::Attribute::StrictFP);
+    if constexpr (kEnableAddressSanitizer) {
+      F->addFnAttr(llvm::Attribute::SanitizeAddress);
+    }
     F->addParamAttr(0, llvm::Attribute::AttrKind::ReadOnly);
     F->addParamAttr(0, llvm::Attribute::AttrKind::NoAlias);
 
