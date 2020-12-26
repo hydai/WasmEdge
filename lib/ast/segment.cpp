@@ -204,6 +204,7 @@ Expect<void> ElementSegment::loadBinary(FileMgr &Mgr, const Configure &Conf) {
 
 /// Load binary of CodeSegment node. See "include/ast/segment.h".
 Expect<void> CodeSegment::loadBinary(FileMgr &Mgr, const Configure &Conf) {
+  Offset = Mgr.getOffset();
   /// Read the code segment size.
   if (auto Res = Mgr.readU32()) {
     SegSize = *Res;
