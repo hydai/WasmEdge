@@ -105,6 +105,7 @@ endif()
 set(CPACK_GENERATOR "${BUILD_PACKAGE}")
 set(CPACK_PACKAGE_DESCRIPTION "WasmEdge is a high performance, extensible, and hardware optimized WebAssembly Virtual Machine for cloud, AI, and blockchain applications.")
 
+include(GNUInstallDirs)
 if(BUILD_TESTS)
   include(CTest)
   add_subdirectory(test)
