@@ -46,7 +46,7 @@ Expect<void> Instruction::loadBinary(FileMgr &Mgr, const Configure &Conf) {
   auto readCheck = [&Mgr](uint8_t Val) -> Expect<void> {
     if (auto Res = Mgr.readByte()) {
       if (*Res != Val) {
-        return logLoadError(ErrCode::InvalidGrammar, Mgr.getOffset() - 1,
+        return logLoadError(ErrCode::ExpectedZeroFlag, Mgr.getOffset() - 1,
                             ASTNodeAttr::Instruction);
       }
     } else {
@@ -126,20 +126,25 @@ Expect<void> Instruction::loadBinary(FileMgr &Mgr, const Configure &Conf) {
   case OpCode::Call:
     return readU32(TargetIdx);
 
-  case OpCode::Call_indirect:
+  case OpCode::Call_indirect: {
     /// Read function index.
     if (auto Res = readU32(TargetIdx); !Res) {
       return Unexpect(Res);
     }
+    uint32_t SizeSrcIdx = Mgr.getOffset();
     /// Read the table index.
     if (auto Res = readU32(SourceIdx); !Res) {
       return Unexpect(Res);
     }
-    if (SourceIdx > 0 && !Conf.hasProposal(Proposal::ReferenceTypes)) {
-      return logNeedProposal(ErrCode::InvalidGrammar, Proposal::ReferenceTypes,
-                             Mgr.getOffset() - 1, ASTNodeAttr::Instruction);
+    SizeSrcIdx = Mgr.getOffset() - SizeSrcIdx;
+    if ((SourceIdx > 0 || SizeSrcIdx > 1) &&
+        !Conf.hasProposal(Proposal::ReferenceTypes)) {
+      return logNeedProposal(
+          ErrCode::ExpectedZeroFlag, Proposal::ReferenceTypes,
+          Mgr.getOffset() - SizeSrcIdx, ASTNodeAttr::Instruction);
     }
     return {};
+  }
 
   /// Reference Instructions.
   case OpCode::Ref__null:

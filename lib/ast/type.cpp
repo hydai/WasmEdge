@@ -16,8 +16,14 @@ Expect<void> Limit::loadBinary(FileMgr &Mgr, const Configure &Conf) {
     case LimitType::HasMinMax:
       break;
     default:
-      return logLoadError(ErrCode::InvalidGrammar, Mgr.getOffset() - 1,
-                          NodeAttr);
+      if (*Res == 0x80 || *Res == 0x81) {
+        /// LEB128 cases will fail.
+        return logLoadError(ErrCode::IntegerTooLong, Mgr.getOffset() - 1,
+                            NodeAttr);
+      } else {
+        return logLoadError(ErrCode::IntegerTooLarge, Mgr.getOffset() - 1,
+                            NodeAttr);
+      }
     }
   } else {
     return logLoadError(Res.error(), Mgr.getOffset(), NodeAttr);

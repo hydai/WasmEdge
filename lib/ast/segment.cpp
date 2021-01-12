@@ -51,7 +51,7 @@ Expect<void> ElementSegment::loadBinary(FileMgr &Mgr, const Configure &Conf) {
 
   /// Read the checking byte.
   uint8_t Check;
-  if (auto Res = Mgr.readByte()) {
+  if (auto Res = Mgr.readU32()) {
     Check = *Res;
   } else {
     return logLoadError(Res.error(), Mgr.getOffset(), NodeAttr);
@@ -187,9 +187,18 @@ Expect<void> ElementSegment::loadBinary(FileMgr &Mgr, const Configure &Conf) {
     }
     for (uint32_t i = 0; i < VecCnt; ++i) {
       InitExprs.emplace_back();
-      if (auto Res = InitExprs.back().loadBinary(Mgr, Conf); !Res) {
-        LOG(ERROR) << ErrInfo::InfoAST(NodeAttr);
-        return Unexpect(Res);
+      if (InitExprs.back().loadBinary(Mgr, Conf)) {
+        for (auto &Instr : InitExprs.back().getInstrs()) {
+          OpCode Code = Instr.getOpCode();
+          if (Code != OpCode::Ref__func && Code != OpCode::Ref__null &&
+              Code != OpCode::End) {
+            return logLoadError(ErrCode::InvalidElemInstr, Instr.getOffset(),
+                                NodeAttr);
+          }
+        }
+      } else {
+        return logLoadError(ErrCode::InvalidElemInstr, Mgr.getOffset(),
+                            NodeAttr);
       }
     }
     break;
@@ -219,6 +228,7 @@ Expect<void> CodeSegment::loadBinary(FileMgr &Mgr, const Configure &Conf) {
   } else {
     return logLoadError(Res.error(), Mgr.getOffset(), NodeAttr);
   }
+  uint32_t TotalLocalCnt = 0;
   for (uint32_t i = 0; i < VecCnt; ++i) {
     uint32_t LocalCnt = 0;
     ValType LocalType = ValType::None;
@@ -227,6 +237,12 @@ Expect<void> CodeSegment::loadBinary(FileMgr &Mgr, const Configure &Conf) {
     } else {
       return logLoadError(Res.error(), Mgr.getOffset(), NodeAttr);
     }
+    /// Total local variables should not more than 2^32.
+    if (UINT32_MAX - TotalLocalCnt < LocalCnt - 1) {
+      return logLoadError(ErrCode::TooManyLocals, Mgr.getOffset(), NodeAttr);
+    }
+    TotalLocalCnt += LocalCnt;
+    /// Read the number type.
     if (auto Res = Mgr.readByte()) {
       LocalType = static_cast<ValType>(*Res);
       if (auto Check = checkValTypeProposals(Conf, LocalType,
@@ -268,7 +284,7 @@ Expect<void> DataSegment::loadBinary(FileMgr &Mgr, const Configure &Conf) {
 
   /// Read the checking byte.
   uint8_t Check;
-  if (auto Res = Mgr.readByte()) {
+  if (auto Res = Mgr.readU32()) {
     Check = *Res;
   } else {
     return logLoadError(Res.error(), Mgr.getOffset(), NodeAttr);

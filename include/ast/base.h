@@ -89,14 +89,18 @@ inline Expect<RefType> checkRefTypeProposals(const Configure &Conf,
   switch (RType) {
   case RefType::ExternRef:
     if (!Conf.hasProposal(Proposal::ReferenceTypes)) {
-      return logNeedProposal(ErrCode::InvalidGrammar, Proposal::ReferenceTypes,
+      return logNeedProposal(ErrCode::InvalidElemType, Proposal::ReferenceTypes,
                              Off, Node);
     }
     [[fallthrough]];
   case RefType::FuncRef:
     return RType;
   default:
-    return logLoadError(ErrCode::InvalidGrammar, Off, Node);
+    if (PConf.hasProposal(Proposal::ReferenceTypes)) {
+      return logLoadError(ErrCode::InvalidRefType, Off, Node);
+    } else {
+      return logLoadError(ErrCode::InvalidElemType, Off, Node);
+    }
   }
 }
 

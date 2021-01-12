@@ -12,8 +12,7 @@ Expect<void> Module::loadBinary(FileMgr &Mgr, const Configure &Conf) {
     Magic = *Res;
     std::vector<Byte> WasmMagic = {0x00, 0x61, 0x73, 0x6D};
     if (Magic != WasmMagic) {
-      return logLoadError(ErrCode::InvalidGrammar, Mgr.getOffset() - 4,
-                          NodeAttr);
+      return logLoadError(ErrCode::InvalidMagic, Mgr.getOffset() - 4, NodeAttr);
     }
   } else {
     return logLoadError(Res.error(), Mgr.getOffset(), NodeAttr);
@@ -22,7 +21,7 @@ Expect<void> Module::loadBinary(FileMgr &Mgr, const Configure &Conf) {
     Version = *Res;
     std::vector<Byte> WasmVersion = {0x01, 0x00, 0x00, 0x00};
     if (Version != WasmVersion) {
-      return logLoadError(ErrCode::InvalidGrammar, Mgr.getOffset() - 4,
+      return logLoadError(ErrCode::InvalidVersion, Mgr.getOffset() - 4,
                           NodeAttr);
     }
   } else {
@@ -96,7 +95,8 @@ Expect<void> Module::loadBinary(FileMgr &Mgr, const Configure &Conf) {
     case 0x08:
       if (StartSec.getContent()) {
         /// Start section should be unique.
-        logLoadError(ErrCode::InvalidGrammar, Mgr.getOffset() - 1, NodeAttr);
+        return logLoadError(ErrCode::JunkSection, Mgr.getOffset() - 1,
+                            NodeAttr);
       }
       if (auto Res = StartSec.loadBinary(Mgr, Conf); !Res) {
         LOG(ERROR) << ErrInfo::InfoAST(NodeAttr);
@@ -125,7 +125,7 @@ Expect<void> Module::loadBinary(FileMgr &Mgr, const Configure &Conf) {
       /// This section is for BulkMemoryOperations or ReferenceTypes proposal.
       if (!Conf.hasProposal(Proposal::BulkMemoryOperations) &&
           !Conf.hasProposal(Proposal::ReferenceTypes)) {
-        return logNeedProposal(ErrCode::InvalidGrammar,
+        return logNeedProposal(ErrCode::InvalidSection,
                                Proposal::BulkMemoryOperations,
                                Mgr.getOffset() - 1, NodeAttr);
       }
@@ -139,17 +139,24 @@ Expect<void> Module::loadBinary(FileMgr &Mgr, const Configure &Conf) {
       }
       break;
     default:
-      return logLoadError(ErrCode::InvalidGrammar, Mgr.getOffset() - 1,
+      return logLoadError(ErrCode::InvalidSection, Mgr.getOffset() - 1,
                           NodeAttr);
     }
+  }
+
+  /// Verify the function section and code section are matched.
+  if (FunctionSec.getContent().size() != CodeSec.getContent().size()) {
+    LOG(ERROR) << ErrCode::IncompatibleFuncCode;
+    LOG(ERROR) << ErrInfo::InfoAST(NodeAttr);
+    return Unexpect(ErrCode::IncompatibleFuncCode);
   }
 
   /// Verify the data count section and data segments are matched.
   if (DataCountSec.getContent()) {
     if (DataSec.getContent().size() != *DataCountSec.getContent()) {
-      LOG(ERROR) << ErrCode::InvalidGrammar;
+      LOG(ERROR) << ErrCode::IncompatibleDataCount;
       LOG(ERROR) << ErrInfo::InfoAST(NodeAttr);
-      return Unexpect(ErrCode::InvalidGrammar);
+      return Unexpect(ErrCode::IncompatibleDataCount);
     }
   }
   return {};
