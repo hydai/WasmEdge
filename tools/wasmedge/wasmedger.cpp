@@ -5,6 +5,7 @@
 #include "common/version.h"
 #include "host/wasi/wasimodule.h"
 #include "host/wasmedge_process/processmodule.h"
+#include "plugin/plugin.h"
 #include "po/argument_parser.h"
 #include "vm/vm.h"
 
@@ -35,8 +36,8 @@ int main(int Argc, const char *Argv[]) {
       PO::MetaVar("PREOPEN_DIRS"sv));
 
   PO::List<std::string> Env(
-      PO::Description(
-          "Environ variables. Each variable can be specified as --env `NAME=VALUE`."sv),
+      PO::Description("Environ variables. Each variable can be specified as "
+                      "--env `NAME=VALUE`."sv),
       PO::MetaVar("ENVS"sv));
 
   PO::Option<PO::Toggle> BulkMemoryOperations(
@@ -48,30 +49,48 @@ int main(int Argc, const char *Argv[]) {
 
   PO::List<int> MemLim(
       PO::Description(
-          "Limitation of pages(as size of 64 KiB) in every memory instance. Upper bound can be specified as --memory-page-limit `PAGE_COUNT`."sv),
+          "Limitation of pages(as size of 64 KiB) in every memory instance. "
+          "Upper bound can be specified as --memory-page-limit `PAGE_COUNT`."
+          ""sv),
       PO::MetaVar("PAGE_COUNT"sv));
 
   PO::List<std::string> AllowCmd(
       PO::Description(
-          "Allow commands called from wasmedge_process host functions. Each command can be specified as --allow-command `COMMAND`."sv),
+          "Allow commands called from wasmedge_process host functions. Each "
+          "command can be specified as --allow-command `COMMAND`."sv),
       PO::MetaVar("COMMANDS"sv));
   PO::Option<PO::Toggle> AllowCmdAll(PO::Description(
       "Allow all commands called from wasmedge_process host functions."sv));
 
+  std::vector<WasmEdge::Plugin::Plugin> Plugins;
+  for (const auto &PluginPath : WasmEdge::Plugin::Plugin::enumerate(
+           std::filesystem::current_path() / "plugins"sv)) {
+    if (auto Plugin = WasmEdge::Plugin::Plugin::load(PluginPath)) {
+      LOG(INFO) << "plugin "sv << Plugin->getName() << ' '
+                << Plugin->getVersion() << " loaded"sv;
+      Plugins.push_back(std::move(*Plugin));
+    }
+  }
+
   auto Parser = PO::ArgumentParser();
-  if (!Parser.add_option(SoName)
-           .add_option(Args)
-           .add_option("reactor"sv, Reactor)
-           .add_option("dir"sv, Dir)
-           .add_option("env"sv, Env)
-           .add_option("disable-bulk-memory"sv, BulkMemoryOperations)
-           .add_option("disable-reference-types"sv, ReferenceTypes)
-           .add_option("enable-simd"sv, SIMD)
-           .add_option("enable-all"sv, All)
-           .add_option("memory-page-limit"sv, MemLim)
-           .add_option("allow-command"sv, AllowCmd)
-           .add_option("allow-command-all"sv, AllowCmdAll)
-           .parse(Argc, Argv)) {
+  Parser.add_option(SoName)
+      .add_option(Args)
+      .add_option("reactor"sv, Reactor)
+      .add_option("dir"sv, Dir)
+      .add_option("env"sv, Env)
+      .add_option("disable-bulk-memory"sv, BulkMemoryOperations)
+      .add_option("disable-reference-types"sv, ReferenceTypes)
+      .add_option("enable-simd"sv, SIMD)
+      .add_option("enable-all"sv, All)
+      .add_option("memory-page-limit"sv, MemLim)
+      .add_option("allow-command"sv, AllowCmd)
+      .add_option("allow-command-all"sv, AllowCmdAll);
+
+  for (const auto &Plugin : Plugins) {
+    Plugin.RegisterArgument(Parser);
+  }
+
+  if (!Parser.parse(Argc, Argv)) {
     return EXIT_FAILURE;
   }
   if (Parser.isVersion()) {
@@ -118,6 +137,14 @@ int main(int Argc, const char *Argv[]) {
   WasiMod->getEnv().init(Dir.value(),
                          InputPath.filename().replace_extension("wasm"sv),
                          Args.value(), Env.value());
+
+  std::vector<std::unique_ptr<WasmEdge::Runtime::ImportObject>>
+      PluginHostModules;
+
+  for (const auto &Plugin : Plugins) {
+    PluginHostModules.push_back(Plugin.AllocateHostModule());
+    VM.registerModule(*PluginHostModules.back());
+  }
 
   if (!Reactor.value()) {
     // command mode
