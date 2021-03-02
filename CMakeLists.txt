@@ -46,6 +46,7 @@ option(BUILD_AOT_RUNTIME "Enable WasmEdge LLVM-based ahead of time compilation r
 option(BUILD_SHARED_LIB "Generate the WasmEdge shared library." ON)
 option(BUILD_TOOLS "Generate wasmedge and wasmedgec tools." ON)
 option(BUILD_TOOL_WASMEDGE_STATIC "Generate wasmedge-static tool" ON)
+option(SUPPORT_PLUGIN "Enable plugin support." ON)
 set(BUILD_PACKAGE "DEB;RPM" CACHE STRING "Package generate types")
 set(CPACK_PROJECT_CONFIG_FILE ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cpack_config.cmake)
 
