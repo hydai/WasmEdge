@@ -117,6 +117,11 @@ jobs:
           export CPPFLAGS=-I/toolchain/include
           export CXXFLAGS=-I/toolchain/include
           export LDFLAGS=-L/toolchain/lib64
+          echo $CC
+          echo $CXX
+          echo $CPPFLAGS
+          echo $CXXFLAGS
+          echo $LDFLAGS
           rm -rf build
           cmake -Bbuild -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TOOL_WASMEDGE_STATIC=OFF -DBUILD_PACKAGE="TGZ;TBZ2;TXZ;TZST;RPM" -DBoost_NO_SYSTEM_PATHS=TRUE -DBOOST_ROOT=./boost_1_75_0/ .
           cmake --build build
@@ -238,6 +243,11 @@ jobs:
           export CPPFLAGS=-I/toolchain/include
           export CXXFLAGS=-I/toolchain/include
           export LDFLAGS=-L/toolchain/lib64
+          echo $CC
+          echo $CXX
+          echo $CPPFLAGS
+          echo $CXXFLAGS
+          echo $LDFLAGS
           rm -rf build
           cmake -Bbuild -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TOOL_WASMEDGE_STATIC=OFF -DBUILD_PACKAGE="TGZ;TBZ2;TXZ;TZST;RPM" -DBoost_NO_SYSTEM_PATHS=TRUE -DBOOST_ROOT=./boost_1_75_0/ .
           cmake --build build
@@ -360,6 +370,11 @@ jobs:
           export CPPFLAGS=-I/toolchain/include
           export CXXFLAGS=-I/toolchain/include
           export LDFLAGS=-L/toolchain/lib64
+          echo $CC
+          echo $CXX
+          echo $CPPFLAGS
+          echo $CXXFLAGS
+          echo $LDFLAGS
           rm -rf build
           cmake -Bbuild -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_TOOL_WASMEDGE_STATIC=OFF -DBUILD_PACKAGE="TGZ;TBZ2;TXZ;TZST;RPM" -DBoost_NO_SYSTEM_PATHS=TRUE -DBOOST_ROOT=./boost_1_75_0/ .
           cmake --build build
