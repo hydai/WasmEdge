@@ -149,6 +149,10 @@ jobs:
         uses: actions/download-artifact@v1
         with:
           name: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.rpm
+      - name: Verify the arifact
+        run: |
+          ls -alh .
+          ls -alh WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.rpm
       - name: Upload manylinux1_x86_64 rpm package
         uses: actions/upload-release-asset@v1
         env:
@@ -276,6 +280,10 @@ jobs:
         uses: actions/download-artifact@v1
         with:
           name: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.rpm
+      - name: Verify the arifact
+        run: |
+          ls -alh .
+          ls -alh WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.rpm
       - name: Upload manylinux2010_x86_64 rpm package
         uses: actions/upload-release-asset@v1
         env:
