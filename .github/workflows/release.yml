@@ -10,7 +10,7 @@ on:
       - "*"
 
 jobs:
-  create:
+  create_release:
     name: Create Release
     runs-on: ubuntu-latest
     container:
@@ -36,9 +36,9 @@ jobs:
           body_path: .CurrentChangelog.md
           draft: true
           prerelease: false
-  build_and_upload_amd64_package:
+  build_on_amd64:
     name: Build WasmEdge and upload WasmEdge on amd64 platform
-    needs: create
+    needs: create_release
     runs-on: ubuntu-latest
     container:
       image: wasmedge/wasmedge:ubuntu-build-gcc
@@ -53,7 +53,7 @@ jobs:
           cmake -Bbuild -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_PACKAGE="TGZ;DEB;RPM" .
           cmake --build build
           cmake --build build --target package
-      - name: Upload WasmEdge amd64 deb package
+      - name: Upload deb package
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,7 +62,7 @@ jobs:
           asset_path: build/wasmedge_${{ needs.create.outputs.version }}_amd64.deb
           asset_name: WasmEdge-${{ needs.create.outputs.version }}.deb
           asset_content_type: application/vnd.debian.binary-package
-      - name: Upload wasmedge rpm package
+      - name: Upload rpm package
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -71,7 +71,7 @@ jobs:
           asset_path: build/WasmEdge-${{ needs.create.outputs.version }}-Linux.rpm
           asset_name: WasmEdge-${{ needs.create.outputs.version }}.rpm
           asset_content_type: application/x-rpm
-      - name: Upload wasmedge tar.gz package
+      - name: Upload tar.gz package
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,9 +80,9 @@ jobs:
           asset_path: build/WasmEdge-${{ needs.create.outputs.version }}-Linux.tar.gz
           asset_name: WasmEdge-${{ needs.create.outputs.version }}.tar.gz
           asset_content_type: application/x-gzip
-  build_and_upload_manylinux1_x86_64_package:
-    name: Build WasmEdge on manylinux1_x86_64 platform and upload WasmEdge manylinux1 x86_64 package
-    needs: create
+  build_on_manylinux1_x86_64:
+    name: Build on manylinux1_x86_64 platform
+    needs: create_release
     runs-on: ubuntu-latest
     container:
       image: wasmedge/wasmedge:manylinux1_x86_64
@@ -92,7 +92,7 @@ jobs:
       - name: Build manylinux1_x86_64 package
         run: |
           bash utils/docker/build-manylinux.sh
-      - name: Upload manylinux1_x86_64 rpm package to artifact
+      - name: Upload rpm package to artifact
         uses: actions/upload-artifact@v1
         with:
           name: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.rpm
@@ -107,9 +107,9 @@ jobs:
         with:
           name: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.tar.xz
           path: build/WasmEdge-${{ needs.create.outputs.version }}-Linux.tar.xz
-  download_manylinux1_x86_64_artifact_and_upload_assets:
-    name: Download WasmEdge artifacts on manylinux1_x86_64 platform and upload WasmEdge manylinux1 x86_64 package
-    needs: [create, build_and_upload_manylinux1_x86_64_package]
+  upload_manylinux1_x86_64_assets:
+    name: Upload WasmEdge manylinux1 x86_64 package
+    needs: [create_release, build_on_manylinux1_x86_64]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -128,7 +128,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create.outputs.upload_url }}
-          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.rpm
+          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.rpm/WasmEdge-${{ needs.create.outputs.version }}-Linux.rpm
           asset_name: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.rpm
           asset_content_type: application/x-rpm
       - name: Download manylinux1_x86_64 tar.gz artifact
@@ -141,7 +141,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create.outputs.upload_url }}
-          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.tar.gz
+          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.tar.gz/WasmEdge-${{ needs.create.outputs.version }}-Linux.tar.gz
           asset_name: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.tar.gz
           asset_content_type: application/x-gzip
       - name: Download manylinux1_x86_64 tar.xz artifact
@@ -154,13 +154,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create.outputs.upload_url }}
-          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.tar.xz
+          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.tar.xz/WasmEdge-${{ needs.create.outputs.version }}-Linux.tar.xz
           asset_name: WasmEdge-${{ needs.create.outputs.version }}-manylinux1_x86_64.tar.xz
           asset_content_type: application/x-xz
 
-  build_and_upload_manylinux2010_x86_64_package:
-    name: Build WasmEdge on manylinux2010_x86_64 platform and upload WasmEdge manylinux2010 x86_64 package
-    needs: create
+  build_on_manylinux2010_x86_64:
+    name: Build WasmEdge on manylinux2010_x86_64 platform
+    needs: create_release
     runs-on: ubuntu-latest
     container:
       image: wasmedge/wasmedge:manylinux2010_x86_64
@@ -186,9 +186,9 @@ jobs:
           name: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.tar.xz
           path: build/WasmEdge-${{ needs.create.outputs.version }}-Linux.tar.xz
 
-  download_manylinux2010_x86_64_artifact_and_upload_assets:
-    name: Download WasmEdge artifacts on manylinux2010_x86_64 platform and upload WasmEdge manylinux2010 x86_64 package
-    needs: [create, build_and_upload_manylinux2010_x86_64_package]
+  upload_manylinux2010_x86_64_assets:
+    name: Upload WasmEdge manylinux2010 x86_64 package
+    needs: [create_release, build_on_manylinux2010_x86_64]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -207,7 +207,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create.outputs.upload_url }}
-          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.rpm
+          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.rpm/WasmEdge-${{ needs.create.outputs.version }}-Linux.rpm
           asset_name: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.rpm
           asset_content_type: application/x-rpm
       - name: Download manylinux2010_x86_64 tar.gz artifact
@@ -220,7 +220,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create.outputs.upload_url }}
-          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.tar.gz
+          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.tar.gz/WasmEdge-${{ needs.create.outputs.version }}-Linux.tar.gz
           asset_name: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.tar.gz
           asset_content_type: application/x-gzip
       - name: Download manylinux2010_x86_64 tar.xz artifact
@@ -233,13 +233,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.create.outputs.upload_url }}
-          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.tar.xz
+          asset_path: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.tar.xz/WasmEdge-${{ needs.create.outputs.version }}-Linux.tar.xz
           asset_name: WasmEdge-${{ needs.create.outputs.version }}-manylinux2010_x86_64.tar.xz
           asset_content_type: application/x-xz
 
   build_and_upload_manylinux2014_x86_64_package:
     name: Build WasmEdge on manylinux2014_x86_64 platform and upload WasmEdge manylinux2014 x86_64 package
-    needs: create
+    needs: create_release
     runs-on: ubuntu-latest
     container:
       image: wasmedge/wasmedge:manylinux2014_x86_64
