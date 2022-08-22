@@ -37,12 +37,24 @@ jobs:
         run: |
           bash utils/docker/build-manylinux.sh
           ./build/tools/wasmedge/wasmedge -v
-      - name: Upload artifact (v1)
+      - name: Upload artifact (v1) - tar.gz
         if: ${{ inputs.legacy }}
         uses: actions/upload-artifact@v1
         with:
           path: build/WasmEdge-${{ inputs.version }}-Linux.tar.gz
           name: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.tar.gz
+      - name: Upload artifact (v1) - tar.xz
+        if: ${{ inputs.legacy }}
+        uses: actions/upload-artifact@v1
+        with:
+          path: build/WasmEdge-${{ inputs.version }}-Linux.tar.xz
+          name: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.tar.xz
+      - name: Upload artifact (v1) - rpm
+        if: ${{ inputs.legacy }}
+        uses: actions/upload-artifact@v1
+        with:
+          path: build/WasmEdge-${{ inputs.version }}-Linux.rpm
+          name: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.rpm
       - name: Upload artifact (v2)
         if: ${{ !inputs.legacy && !inputs.release }}
         uses: actions/upload-artifact@v2
@@ -81,7 +93,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ inputs.upload_url }}
+          upload_url: ${{ inputs.upload_asset_url }}
           asset_path: build/WasmEdge-${{ inputs.version }}-Linux.tar.xz
           asset_name: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.tar.xz
           asset_content_type: application/x-xz
@@ -115,7 +127,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ inputs.upload_url }}
+          upload_url: ${{ inputs.upload_asset_url }}
           asset_path: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.rpm/WasmEdge-${{ inputs.version }}-Linux.rpm
           asset_name: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.rpm
           asset_content_type: application/x-rpm
@@ -134,7 +146,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ inputs.upload_url }}
+          upload_url: ${{ inputs.upload_asset_url }}
           asset_path: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.tar.gz/WasmEdge-${{ inputs.version }}-Linux.tar.gz
           asset_name: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.tar.gz
           asset_content_type: application/x-gzip
@@ -153,7 +165,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ inputs.upload_url }}
+          upload_url: ${{ inputs.upload_asset_url }}
           asset_path: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.tar.xz/WasmEdge-${{ inputs.version }}-Linux.tar.xz
           asset_name: WasmEdge-${{ inputs.version }}-${{ matrix.docker_tag }}.tar.xz
           asset_content_type: application/x-xz
