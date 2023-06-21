@@ -46,11 +46,8 @@ jobs:
           path: build/WasmEdge-${{ inputs.version }}-Android.tar.gz
       - name: Upload tar.gz package
         if: ${{ inputs.release }}
-        uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ inputs.upload_asset_url }}
-          asset_name: WasmEdge-${{ inputs.version }}-android_aarch64.tar.gz
-          asset_path: build/WasmEdge-${{ inputs.version }}-Android.tar.gz
-          asset_content_type: application/x-gzip
+        run: |
+          mv build/WasmEdge-${{ inputs.version }}-Android.tar.gz WasmEdge-${{ inputs.version }}-android_aarch64.tar.gz
+          gh release upload ${{ inputs.version }} WasmEdge-${{ inputs.version }}-android_aarch64.tar.gz --clobber
