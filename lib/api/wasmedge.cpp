@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -384,31 +385,62 @@ template <typename T, typename... Args>
 inline bool isContext(T *Cxt, Args *...Cxts) noexcept {
   return isContext(Cxt) && isContext(Cxts...);
 }
-inline void logUnhandledCAPIException() noexcept {
+inline void logUnhandledCAPIException(const bool UseSpdlog = true) noexcept {
   using namespace std::literals::string_view_literals;
-  // Guard: if called outside a catch block, std::current_exception() is null.
-  // In that case, do nothing instead of calling throw; which would terminate.
   if (!std::current_exception()) {
     return;
   }
+  static thread_local bool IsLoggingUnhandledCAPIException = false;
+  struct RecursionGuard {
+    explicit RecursionGuard(bool &ValueRef) noexcept : Value(ValueRef) {
+      Value = true;
+    }
+    ~RecursionGuard() noexcept { Value = false; }
+    bool &Value;
+  };
+  auto ReportBadAlloc = [&]() noexcept {
+    if (UseSpdlog && !IsLoggingUnhandledCAPIException) {
+      RecursionGuard Guard(IsLoggingUnhandledCAPIException);
+      try {
+        spdlog::error("Unhandled std::bad_alloc in WasmEdge C API."sv);
+      } catch (...) {
+      }
+    } else {
+      std::fputs("Unhandled std::bad_alloc in WasmEdge C API.\n", stderr);
+    }
+  };
+  auto ReportStdException = [&](const std::exception &E) noexcept {
+    if (UseSpdlog && !IsLoggingUnhandledCAPIException) {
+      RecursionGuard Guard(IsLoggingUnhandledCAPIException);
+      try {
+        spdlog::error("Unhandled C++ exception in WasmEdge C API: {}"sv,
+                      E.what());
+      } catch (...) {
+      }
+    } else {
+      std::fprintf(stderr, "Unhandled C++ exception in WasmEdge C API: %s\n",
+                   E.what());
+    }
+  };
+  auto ReportUnknownException = [&]() noexcept {
+    if (UseSpdlog && !IsLoggingUnhandledCAPIException) {
+      RecursionGuard Guard(IsLoggingUnhandledCAPIException);
+      try {
+        spdlog::error("Unhandled unknown exception in WasmEdge C API."sv);
+      } catch (...) {
+      }
+    } else {
+      std::fputs("Unhandled unknown exception in WasmEdge C API.\n", stderr);
+    }
+  };
   try {
     throw;
   } catch (const std::bad_alloc &) {
-    try {
-      spdlog::error("Unhandled std::bad_alloc in WasmEdge C API."sv);
-    } catch (...) {
-    }
+    ReportBadAlloc();
   } catch (const std::exception &E) {
-    try {
-      spdlog::error("Unhandled C++ exception in WasmEdge C API: {}"sv,
-                    E.what());
-    } catch (...) {
-    }
+    ReportStdException(E);
   } catch (...) {
-    try {
-      spdlog::error("Unhandled unknown exception in WasmEdge C API."sv);
-    } catch (...) {
-    }
+    ReportUnknownException();
   }
 }
 inline std::function<void(void *)>
@@ -421,6 +453,31 @@ wrapHostDataFinalizer(void (*Finalizer)(void *)) {
       Finalizer(Data);
     } catch (...) {
       logUnhandledCAPIException();
+    }
+  };
+}
+inline std::function<void(const spdlog::details::log_msg &)>
+wrapLogCallback(WasmEdge_LogCallback_t Callback) {
+  if (Callback == nullptr) {
+    return {};
+  }
+  return [Callback](const spdlog::details::log_msg &Msg) {
+    try {
+      WasmEdge_LogMessage Message;
+
+      Message.Message =
+          WasmEdge_String{/* Length */ static_cast<uint32_t>(Msg.payload.size()),
+                          /* Buf */ Msg.payload.data()};
+      Message.LoggerName = WasmEdge_String{
+          /* Length */ static_cast<uint32_t>(Msg.logger_name.size()),
+          /* Buf */ Msg.logger_name.data()};
+      Message.Level = static_cast<WasmEdge_LogLevel>(Msg.level);
+      Message.Time = std::chrono::system_clock::to_time_t(Msg.time);
+      Message.ThreadId = static_cast<uint64_t>(Msg.thread_id);
+
+      Callback(&Message);
+    } catch (...) {
+      logUnhandledCAPIException(false);
     }
   };
 }
@@ -698,26 +755,7 @@ WASMEDGE_CAPI_EXPORT void WasmEdge_LogSetLevel(WasmEdge_LogLevel Level) {
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_LogSetCallback(WasmEdge_LogCallback_t Callback) {
   runCAPI([&]() {
-    if (Callback) {
-      WasmEdge::Log::setLoggingCallback(
-          [Callback](const spdlog::details::log_msg &Msg) {
-            WasmEdge_LogMessage Message;
-
-            Message.Message = WasmEdge_String{
-                /* Length */ static_cast<uint32_t>(Msg.payload.size()),
-                /* Buf */ Msg.payload.data()};
-            Message.LoggerName = WasmEdge_String{
-                /* Length */ static_cast<uint32_t>(Msg.logger_name.size()),
-                /* Buf */ Msg.logger_name.data()};
-            Message.Level = static_cast<WasmEdge_LogLevel>(Msg.level);
-            Message.Time = std::chrono::system_clock::to_time_t(Msg.time);
-            Message.ThreadId = static_cast<uint64_t>(Msg.thread_id);
-
-            Callback(&Message);
-          });
-    } else {
-      WasmEdge::Log::setLoggingCallback({});
-    }
+    WasmEdge::Log::setLoggingCallback(wrapLogCallback(Callback));
   });
 }
 

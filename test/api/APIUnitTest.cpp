@@ -313,6 +313,8 @@ WasmEdge_Result externThrow(void *, const WasmEdge_CallingFrameContext *,
 
 void throwingFinalizer(void *) { throw std::bad_alloc(); }
 
+void throwingLogCallback(const WasmEdge_LogMessage *) { throw std::bad_alloc(); }
+
 void noopLogCallback(const WasmEdge_LogMessage *) {}
 
 WasmEdge_Result externWrap(void *This, void *Data,
@@ -823,6 +825,35 @@ TEST(APICoreTest, CAPIExceptionSafetyDeleteFinalizer) {
     Threw = true;
   }
   EXPECT_FALSE(Threw);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyThrowingLogCallback) {
+  WasmEdge_ValType VType = WasmEdge_ValTypeGenExternRef();
+  VType.Data[2] = WasmEdge_TypeCode_Ref;
+  WasmEdge_LimitContext *TabLim = WasmEdge_LimitCreate(10, false);
+  ASSERT_NE(TabLim, nullptr);
+  WasmEdge_TableTypeContext *TabType = WasmEdge_TableTypeCreate(VType, TabLim);
+  ASSERT_NE(TabType, nullptr);
+
+  WasmEdge_LogSetErrorLevel();
+  WasmEdge_LogSetCallback(throwingLogCallback);
+
+  WasmEdge_TableInstanceContext *TabCxt = nullptr;
+  bool Threw = false;
+  try {
+    TabCxt = WasmEdge_TableInstanceCreate(TabType);
+  } catch (...) {
+    Threw = true;
+  }
+  EXPECT_FALSE(Threw);
+  EXPECT_EQ(TabCxt, nullptr);
+
+  if (TabCxt) {
+    WasmEdge_TableInstanceDelete(TabCxt);
+  }
+  WasmEdge_TableTypeDelete(TabType);
+  WasmEdge_LimitDelete(TabLim);
+  WasmEdge_LogSetCallback(nullptr);
 }
 
 TEST(APICoreTest, CAPIExceptionSafetyPartialFailure) {
