@@ -7,6 +7,7 @@
 #include "wasmedge/wasmedge.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -25,17 +26,27 @@
 
 using namespace std::literals;
 
-// Declared in wasmedge.cpp when WASMEDGE_CAPI_TEST_HOOKS is defined.
-extern "C" void WasmEdge_TestSetThrowCountdown(int32_t Count);
-
 namespace {
+
+void setCAPIThrowCountdown(int32_t Count) {
+  static std::atomic<uint64_t> ThrowCookie{0};
+  const auto Cookie =
+      ThrowCookie.fetch_add(1, std::memory_order_relaxed) + 1U;
+  const auto CountString = std::to_string(Count);
+  const auto CookieString = std::to_string(Cookie);
+#if WASMEDGE_OS_WINDOWS
+  _putenv_s("WASMEDGE_CAPI_THROW_COUNTDOWN", CountString.c_str());
+  _putenv_s("WASMEDGE_CAPI_THROW_COOKIE", CookieString.c_str());
+#else
+  setenv("WASMEDGE_CAPI_THROW_COUNTDOWN", CountString.c_str(), 1);
+  setenv("WASMEDGE_CAPI_THROW_COOKIE", CookieString.c_str(), 1);
+#endif
+}
 
 class ScopedCAPIThrowHook {
 public:
-  explicit ScopedCAPIThrowHook(int32_t Count) noexcept {
-    WasmEdge_TestSetThrowCountdown(Count);
-  }
-  ~ScopedCAPIThrowHook() { WasmEdge_TestSetThrowCountdown(-1); }
+  explicit ScopedCAPIThrowHook(int32_t Count) noexcept { setCAPIThrowCountdown(Count); }
+  ~ScopedCAPIThrowHook() { setCAPIThrowCountdown(-1); }
   ScopedCAPIThrowHook(const ScopedCAPIThrowHook &) = delete;
   ScopedCAPIThrowHook &operator=(const ScopedCAPIThrowHook &) = delete;
 };
@@ -299,6 +310,8 @@ WasmEdge_Result externThrow(void *, const WasmEdge_CallingFrameContext *,
                             const WasmEdge_Value *, WasmEdge_Value *) {
   throw std::bad_alloc();
 }
+
+void throwingFinalizer(void *) { throw std::bad_alloc(); }
 
 void noopLogCallback(const WasmEdge_LogMessage *) {}
 
@@ -795,6 +808,21 @@ TEST(APICoreTest, CAPIExceptionSafetyHostFunctionThrow) {
   WasmEdge_ModuleInstanceDelete(HostMod);
   WasmEdge_StoreDelete(Store);
   WasmEdge_ExecutorDelete(Exec);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyDeleteFinalizer) {
+  WasmEdge_ModuleInstanceContext *HostMod =
+      WasmEdge_ModuleInstanceCreateWithData(WasmEdge_StringWrap("thrower", 7),
+                                            nullptr, throwingFinalizer);
+  ASSERT_NE(HostMod, nullptr);
+
+  bool Threw = false;
+  try {
+    WasmEdge_ModuleInstanceDelete(HostMod);
+  } catch (...) {
+    Threw = true;
+  }
+  EXPECT_FALSE(Threw);
 }
 
 TEST(APICoreTest, CAPIExceptionSafetyPartialFailure) {

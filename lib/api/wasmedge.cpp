@@ -140,21 +140,48 @@ namespace {
 using namespace WasmEdge;
 
 #ifdef WASMEDGE_CAPI_TEST_HOOKS
-// Atomic countdown for fault injection in tests. A value < 0 means disabled.
-// When >= 0, each C API entry point decrements the counter; when it hits 0,
-// a std::bad_alloc is thrown to simulate allocation failure.
 inline std::atomic<int32_t> CAPITestThrowCountdown{-1};
+inline std::atomic<uint64_t> CAPITestThrowCookie{0};
 
-inline void setCAPIThrowCountdownForTest(const int32_t Count) noexcept {
-  CAPITestThrowCountdown.store(Count, std::memory_order_relaxed);
+inline void syncCAPIThrowCountdownFromEnv() noexcept {
+  const char *CookieStr = std::getenv("WASMEDGE_CAPI_THROW_COOKIE");
+  if (CookieStr == nullptr) {
+    return;
+  }
+
+  char *CookieEnd = nullptr;
+  const auto Cookie = std::strtoull(CookieStr, &CookieEnd, 10);
+  if (CookieEnd == CookieStr || *CookieEnd != '\0') {
+    return;
+  }
+  if (Cookie == CAPITestThrowCookie.load(std::memory_order_relaxed)) {
+    return;
+  }
+  CAPITestThrowCookie.store(Cookie, std::memory_order_relaxed);
+
+  const char *CountStr = std::getenv("WASMEDGE_CAPI_THROW_COUNTDOWN");
+  if (CountStr == nullptr) {
+    CAPITestThrowCountdown.store(-1, std::memory_order_relaxed);
+    return;
+  }
+
+  char *CountEnd = nullptr;
+  const auto Count = std::strtol(CountStr, &CountEnd, 10);
+  if (CountEnd == CountStr || *CountEnd != '\0') {
+    CAPITestThrowCountdown.store(-1, std::memory_order_relaxed);
+    return;
+  }
+
+  CAPITestThrowCountdown.store(static_cast<int32_t>(Count),
+                               std::memory_order_relaxed);
 }
 
 inline void maybeThrowCAPIExceptionForTest() {
+  syncCAPIThrowCountdownFromEnv();
   int32_t Count = CAPITestThrowCountdown.load(std::memory_order_relaxed);
   if (Count < 0) {
     return;
   }
-  // Atomically decrement; throw when we reach 0.
   while (!CAPITestThrowCountdown.compare_exchange_weak(
       Count, Count - 1, std::memory_order_relaxed)) {
     if (Count < 0) {
@@ -374,6 +401,19 @@ inline void logUnhandledCAPIException() noexcept {
   } catch (...) {
     spdlog::error("Unhandled unknown exception in WasmEdge C API."sv);
   }
+}
+inline std::function<void(void *)>
+wrapHostDataFinalizer(void (*Finalizer)(void *)) {
+  if (Finalizer == nullptr) {
+    return {};
+  }
+  return [Finalizer](void *Data) {
+    try {
+      Finalizer(Data);
+    } catch (...) {
+      logUnhandledCAPIException();
+    }
+  };
 }
 template <typename T, typename F>
 inline T runCAPI(F &&Func, T Fallback) noexcept {
@@ -890,9 +930,11 @@ WASMEDGE_CAPI_EXPORT uint32_t WasmEdge_StringCopy(const WasmEdge_String Str,
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_StringDelete(WasmEdge_String Str) {
-  if (Str.Buf) {
-    delete[] Str.Buf;
-  }
+  runCAPI([&]() {
+    if (Str.Buf) {
+      delete[] Str.Buf;
+    }
+  });
 }
 
 // <<<<<<<< WasmEdge string functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -919,9 +961,11 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Bytes WasmEdge_BytesWrap(const uint8_t *Buf,
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_BytesDelete(WasmEdge_Bytes Bytes) {
-  if (Bytes.Buf) {
-    delete[] Bytes.Buf;
-  }
+  runCAPI([&]() {
+    if (Bytes.Buf) {
+      delete[] Bytes.Buf;
+    }
+  });
 }
 
 // <<<<<<<< WasmEdge bytes functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1217,7 +1261,7 @@ WASMEDGE_CAPI_EXPORT bool WasmEdge_ConfigureStatisticsIsTimeMeasuring(
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_ConfigureDelete(WasmEdge_ConfigureContext *Cxt) {
-  delete Cxt;
+  runCAPI([&]() { delete Cxt; });
 }
 
 // <<<<<<<< WasmEdge configure functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1280,7 +1324,7 @@ WasmEdge_StatisticsClear(WasmEdge_StatisticsContext *Cxt) {
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_StatisticsDelete(WasmEdge_StatisticsContext *Cxt) {
-  delete fromStatCxt(Cxt);
+  runCAPI([&]() { delete fromStatCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge statistics functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1337,7 +1381,9 @@ WASMEDGE_CAPI_EXPORT uint32_t WasmEdge_ASTModuleListExports(
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_ASTModuleDelete(WasmEdge_ASTModuleContext *Cxt) {
-  std::unique_ptr<WasmEdge::AST::Module> Own(fromASTModCxt(Cxt));
+  runCAPI([&]() {
+    std::unique_ptr<WasmEdge::AST::Module> Own(fromASTModCxt(Cxt));
+  });
 }
 
 // <<<<<<<< WasmEdge AST module functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1424,7 +1470,7 @@ WasmEdge_LimitIsEqual(const WasmEdge_LimitContext *Cxt1,
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_LimitDelete(WasmEdge_LimitContext *Cxt) {
-  delete fromLimitCxt(Cxt);
+  runCAPI([&]() { delete fromLimitCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge limit functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1498,7 +1544,7 @@ WasmEdge_FunctionTypeGetReturns(const WasmEdge_FunctionTypeContext *Cxt,
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_FunctionTypeDelete(WasmEdge_FunctionTypeContext *Cxt) {
-  delete fromFuncTypeCxt(Cxt);
+  runCAPI([&]() { delete fromFuncTypeCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge function type functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1538,7 +1584,7 @@ WasmEdge_TableTypeGetLimit(const WasmEdge_TableTypeContext *Cxt) {
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_TableTypeDelete(WasmEdge_TableTypeContext *Cxt) {
-  delete fromTabTypeCxt(Cxt);
+  runCAPI([&]() { delete fromTabTypeCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge table type functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1568,7 +1614,7 @@ WasmEdge_MemoryTypeGetLimit(const WasmEdge_MemoryTypeContext *Cxt) {
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_MemoryTypeDelete(WasmEdge_MemoryTypeContext *Cxt) {
-  delete fromMemTypeCxt(Cxt);
+  runCAPI([&]() { delete fromMemTypeCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge memory type functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1619,7 +1665,7 @@ WasmEdge_GlobalTypeGetMutability(const WasmEdge_GlobalTypeContext *Cxt) {
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_GlobalTypeDelete(WasmEdge_GlobalTypeContext *Cxt) {
-  delete fromGlobTypeCxt(Cxt);
+  runCAPI([&]() { delete fromGlobTypeCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge global type functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -1977,7 +2023,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Result WasmEdge_CompilerCompileFromBytes(
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_CompilerDelete(WasmEdge_CompilerContext *Cxt) {
-  delete Cxt;
+  runCAPI([&]() { delete Cxt; });
 }
 
 // <<<<<<<< WasmEdge AOT compiler functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -2046,7 +2092,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Result WasmEdge_LoaderSerializeASTModule(
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_LoaderDelete(WasmEdge_LoaderContext *Cxt) {
-  delete fromLoaderCxt(Cxt);
+  runCAPI([&]() { delete fromLoaderCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge loader functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -2079,7 +2125,7 @@ WasmEdge_ValidatorValidate(WasmEdge_ValidatorContext *Cxt,
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_ValidatorDelete(WasmEdge_ValidatorContext *Cxt) {
-  delete fromValidatorCxt(Cxt);
+  runCAPI([&]() { delete fromValidatorCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge validator functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -2181,7 +2227,7 @@ WasmEdge_ExecutorAsyncInvoke(WasmEdge_ExecutorContext *Cxt,
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_ExecutorDelete(WasmEdge_ExecutorContext *Cxt) {
-  delete fromExecutorCxt(Cxt);
+  runCAPI([&]() { delete fromExecutorCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge executor functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -2222,7 +2268,7 @@ WasmEdge_StoreListModule(const WasmEdge_StoreContext *Cxt,
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_StoreDelete(WasmEdge_StoreContext *Cxt) {
-  delete fromStoreCxt(Cxt);
+  runCAPI([&]() { delete fromStoreCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge store functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -2288,7 +2334,7 @@ WasmEdge_ModuleInstanceCreateWithData(const WasmEdge_String ModuleName,
   return runCAPI(
       [&]() {
         return toModCxt(new WasmEdge::Runtime::Instance::ModuleInstance(
-            genStrView(ModuleName), HostData, Finalizer));
+            genStrView(ModuleName), HostData, wrapHostDataFinalizer(Finalizer)));
       },
       static_cast<WasmEdge_ModuleInstanceContext *>(nullptr));
 }
@@ -2601,7 +2647,7 @@ WasmEdge_ModuleInstanceAddGlobal(WasmEdge_ModuleInstanceContext *Cxt,
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_ModuleInstanceDelete(WasmEdge_ModuleInstanceContext *Cxt) {
-  delete fromModCxt(Cxt);
+  runCAPI([&]() { delete fromModCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge module instance functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -2661,7 +2707,7 @@ WasmEdge_FunctionInstanceGetData(const WasmEdge_FunctionInstanceContext *Cxt) {
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_FunctionInstanceDelete(WasmEdge_FunctionInstanceContext *Cxt) {
-  delete fromFuncCxt(Cxt);
+  runCAPI([&]() { delete fromFuncCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge function instance functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -2790,7 +2836,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Result WasmEdge_TableInstanceGrow(
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_TableInstanceDelete(WasmEdge_TableInstanceContext *Cxt) {
-  delete fromTabCxt(Cxt);
+  runCAPI([&]() { delete fromTabCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge table instance functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -2888,7 +2934,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Result WasmEdge_MemoryInstanceGrowPage(
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_MemoryInstanceDelete(WasmEdge_MemoryInstanceContext *Cxt) {
-  delete fromMemCxt(Cxt);
+  runCAPI([&]() { delete fromMemCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge memory instance functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -3011,7 +3057,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Result WasmEdge_GlobalInstanceSetValue(
 
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_GlobalInstanceDelete(WasmEdge_GlobalInstanceContext *Cxt) {
-  delete fromGlobCxt(Cxt);
+  runCAPI([&]() { delete fromGlobCxt(Cxt); });
 }
 
 // <<<<<<<< WasmEdge global instance functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -3091,7 +3137,7 @@ WasmEdge_AsyncGet(const WasmEdge_Async *Cxt, WasmEdge_Value *Returns,
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_AsyncDelete(WasmEdge_Async *Cxt) {
-  delete Cxt;
+  runCAPI([&]() { delete Cxt; });
 }
 
 // <<<<<<<< WasmEdge Async functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -3560,7 +3606,7 @@ WasmEdge_VMGetStatisticsContext(WasmEdge_VMContext *Cxt) {
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_VMDelete(WasmEdge_VMContext *Cxt) {
-  delete Cxt;
+  runCAPI([&]() { delete Cxt; });
 }
 
 // <<<<<<<< WasmEdge VM functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -3605,8 +3651,10 @@ WasmEdge_Driver_ArgvCreate(int Argc, const wchar_t *Argv[]) {
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_Driver_ArgvDelete(const char *Argv[]) {
-  std::unique_ptr<char[]> Buffer(reinterpret_cast<char *>(Argv));
-  Buffer.reset();
+  runCAPI([&]() {
+    std::unique_ptr<char[]> Buffer(reinterpret_cast<char *>(Argv));
+    Buffer.reset();
+  });
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_Driver_SetConsoleOutputCPtoUTF8(void) {
@@ -3792,16 +3840,6 @@ WASMEDGE_CAPI_EXPORT void WasmEdge_ExecutorExperimentalRegisterPostHostFunction(
 
 // <<<<<<<< WasmEdge Experimental Functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-// >>>>>>>> WasmEdge Test Hook Functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
-#ifdef WASMEDGE_CAPI_TEST_HOOKS
-WASMEDGE_CAPI_EXPORT void
-WasmEdge_TestSetThrowCountdown(const int32_t Count) {
-  setCAPIThrowCountdownForTest(Count);
-}
-#endif
-
-// <<<<<<<< WasmEdge Test Hook Functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 #ifdef __cplusplus
 } // extern "C"
 #endif
