@@ -385,62 +385,34 @@ template <typename T, typename... Args>
 inline bool isContext(T *Cxt, Args *...Cxts) noexcept {
   return isContext(Cxt) && isContext(Cxts...);
 }
-inline void logUnhandledCAPIException(const bool UseSpdlog = true) noexcept {
+inline void reportCAPIException(const char *Msg,
+                                 const bool UseSpdlog) noexcept {
   using namespace std::literals::string_view_literals;
+  static thread_local bool IsReporting = false;
+  if (UseSpdlog && !IsReporting) {
+    IsReporting = true;
+    try {
+      spdlog::error("Unhandled C++ exception in WasmEdge C API: {}"sv, Msg);
+    } catch (...) {
+    }
+    IsReporting = false;
+  } else {
+    std::fprintf(stderr, "Unhandled C++ exception in WasmEdge C API: %s\n",
+                 Msg);
+  }
+}
+inline void logUnhandledCAPIException(const bool UseSpdlog = true) noexcept {
   if (!std::current_exception()) {
     return;
   }
-  static thread_local bool IsLoggingUnhandledCAPIException = false;
-  struct RecursionGuard {
-    explicit RecursionGuard(bool &ValueRef) noexcept : Value(ValueRef) {
-      Value = true;
-    }
-    ~RecursionGuard() noexcept { Value = false; }
-    bool &Value;
-  };
-  auto ReportBadAlloc = [&]() noexcept {
-    if (UseSpdlog && !IsLoggingUnhandledCAPIException) {
-      RecursionGuard Guard(IsLoggingUnhandledCAPIException);
-      try {
-        spdlog::error("Unhandled std::bad_alloc in WasmEdge C API."sv);
-      } catch (...) {
-      }
-    } else {
-      std::fputs("Unhandled std::bad_alloc in WasmEdge C API.\n", stderr);
-    }
-  };
-  auto ReportStdException = [&](const std::exception &E) noexcept {
-    if (UseSpdlog && !IsLoggingUnhandledCAPIException) {
-      RecursionGuard Guard(IsLoggingUnhandledCAPIException);
-      try {
-        spdlog::error("Unhandled C++ exception in WasmEdge C API: {}"sv,
-                      E.what());
-      } catch (...) {
-      }
-    } else {
-      std::fprintf(stderr, "Unhandled C++ exception in WasmEdge C API: %s\n",
-                   E.what());
-    }
-  };
-  auto ReportUnknownException = [&]() noexcept {
-    if (UseSpdlog && !IsLoggingUnhandledCAPIException) {
-      RecursionGuard Guard(IsLoggingUnhandledCAPIException);
-      try {
-        spdlog::error("Unhandled unknown exception in WasmEdge C API."sv);
-      } catch (...) {
-      }
-    } else {
-      std::fputs("Unhandled unknown exception in WasmEdge C API.\n", stderr);
-    }
-  };
   try {
     throw;
   } catch (const std::bad_alloc &) {
-    ReportBadAlloc();
+    reportCAPIException("std::bad_alloc", UseSpdlog);
   } catch (const std::exception &E) {
-    ReportStdException(E);
+    reportCAPIException(E.what(), UseSpdlog);
   } catch (...) {
-    ReportUnknownException();
+    reportCAPIException("unknown exception", UseSpdlog);
   }
 }
 inline std::function<void(void *)>
@@ -3545,8 +3517,7 @@ WASMEDGE_CAPI_EXPORT void WasmEdge_VMForceDeleteRegisteredModule(
         WasmEdge_StoreFindModule(StoreCxt, ModuleName);
     if (ModInst) {
       fromStoreCxt(StoreCxt)->unregisterModule(genStrView(ModuleName));
-      WasmEdge_ModuleInstanceDelete(
-          const_cast<WasmEdge_ModuleInstanceContext *>(ModInst));
+      delete fromModCxt(const_cast<WasmEdge_ModuleInstanceContext *>(ModInst));
     }
   });
 }
