@@ -354,7 +354,7 @@ genWasiInitData(const char *const *Args, const uint32_t ArgLen,
                 const char *const *Preopens, const uint32_t PreopenLen) {
   WasiInitData Data;
   if (Args && ArgLen > 0) {
-    Data.ProgramName = Args[0];
+    Data.ProgramName = Args[0] ? Args[0] : "";
     Data.Args = genStringVector(Args + 1, ArgLen - 1);
   }
   Data.Envs = genStringVector(Envs, EnvLen);

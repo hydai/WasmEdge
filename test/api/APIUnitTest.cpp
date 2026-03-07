@@ -2651,6 +2651,7 @@ TEST(APICoreTest, ModuleInstance) {
     fmt::print("Data address: {}\n"sv, Data);
   };
   WasmEdge_ValType Param[2], Result[1];
+  const char *ArgsWithNullProgram[2] = {nullptr, "second"};
 
   // Create module instance with name ""
   HostMod = WasmEdge_ModuleInstanceCreate({/* Length */ 0, /* Buf */ nullptr});
@@ -2766,6 +2767,11 @@ TEST(APICoreTest, ModuleInstance) {
   EXPECT_NE(HostMod, nullptr);
   WasmEdge_ModuleInstanceDelete(HostMod);
   HostMod =
+      WasmEdge_ModuleInstanceCreateWASI(ArgsWithNullProgram, 2, Envs, 3,
+                                        Preopens, 5);
+  EXPECT_NE(HostMod, nullptr);
+  WasmEdge_ModuleInstanceDelete(HostMod);
+  HostMod =
       WasmEdge_ModuleInstanceCreateWASI(nullptr, 0, nullptr, 0, nullptr, 0);
   EXPECT_NE(HostMod, nullptr);
   WasmEdge_ModuleInstanceDelete(HostMod);
@@ -2836,6 +2842,9 @@ TEST(APICoreTest, ModuleInstance) {
       WasmEdge_VMGetImportModuleContext(VM, WasmEdge_HostRegistration_Wasi);
   EXPECT_NE(HostMod, nullptr);
   WasmEdge_ModuleInstanceInitWASI(nullptr, Args, 2, Envs, 3, Preopens, 5);
+  EXPECT_TRUE(true);
+  WasmEdge_ModuleInstanceInitWASI(HostMod, ArgsWithNullProgram, 2, Envs, 3,
+                                  Preopens, 5);
   EXPECT_TRUE(true);
   WasmEdge_ModuleInstanceInitWASI(HostMod, Args, 2, Envs, 3, Preopens, 5);
   EXPECT_TRUE(true);
