@@ -3442,100 +3442,124 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Async *WasmEdge_VMAsyncExecuteRegistered(
 WASMEDGE_CAPI_EXPORT const WasmEdge_FunctionTypeContext *
 WasmEdge_VMGetFunctionType(const WasmEdge_VMContext *Cxt,
                            const WasmEdge_String FuncName) {
-  if (Cxt) {
-    if (const auto *ModInst = Cxt->VM.getActiveModule(); ModInst != nullptr) {
-      if (const auto *FuncInst = ModInst->findFuncExports(genStrView(FuncName));
-          FuncInst != nullptr) {
-        return toFuncTypeCxt(&FuncInst->getFuncType());
-      }
-    }
-  }
-  return nullptr;
+  return runCAPI(
+      [&]() -> const WasmEdge_FunctionTypeContext * {
+        if (Cxt) {
+          if (const auto *ModInst = Cxt->VM.getActiveModule();
+              ModInst != nullptr) {
+            if (const auto *FuncInst =
+                    ModInst->findFuncExports(genStrView(FuncName));
+                FuncInst != nullptr) {
+              return toFuncTypeCxt(&FuncInst->getFuncType());
+            }
+          }
+        }
+        return nullptr;
+      },
+      static_cast<const WasmEdge_FunctionTypeContext *>(nullptr));
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_FunctionTypeContext *
 WasmEdge_VMGetFunctionTypeRegistered(const WasmEdge_VMContext *Cxt,
                                      const WasmEdge_String ModuleName,
                                      const WasmEdge_String FuncName) {
-  if (Cxt) {
-    const auto *ModInst =
-        Cxt->VM.getStoreManager().findModule(genStrView(ModuleName));
-    if (ModInst != nullptr) {
-      const auto *FuncInst = ModInst->findFuncExports(genStrView(FuncName));
-      if (FuncInst != nullptr) {
-        return toFuncTypeCxt(&FuncInst->getFuncType());
-      }
-    }
-  }
-  return nullptr;
+  return runCAPI(
+      [&]() -> const WasmEdge_FunctionTypeContext * {
+        if (Cxt) {
+          const auto *ModInst =
+              Cxt->VM.getStoreManager().findModule(genStrView(ModuleName));
+          if (ModInst != nullptr) {
+            const auto *FuncInst =
+                ModInst->findFuncExports(genStrView(FuncName));
+            if (FuncInst != nullptr) {
+              return toFuncTypeCxt(&FuncInst->getFuncType());
+            }
+          }
+        }
+        return nullptr;
+      },
+      static_cast<const WasmEdge_FunctionTypeContext *>(nullptr));
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_VMCleanup(WasmEdge_VMContext *Cxt) {
-  if (Cxt) {
-    Cxt->VM.cleanup();
-  }
+  cleanupCAPI([&]() {
+    if (Cxt) {
+      Cxt->VM.cleanup();
+    }
+  });
 }
 
 void WasmEdge_VMForceDeleteRegisteredModule(const WasmEdge_VMContext *Cxt,
                                             const WasmEdge_String ModuleName) {
-  if (!Cxt || !ModuleName.Buf) {
-    return; // Invalid input
-  }
+  cleanupCAPI([&]() {
+    if (!Cxt || !ModuleName.Buf) {
+      return; // Invalid input
+    }
 
-  // Cast away const to match WasmEdge_VMGetStoreContext signature
-  WasmEdge_StoreContext *StoreCxt =
-      WasmEdge_VMGetStoreContext(const_cast<WasmEdge_VMContext *>(Cxt));
-  if (!StoreCxt) {
-    return; // Invalid store context
-  }
+    // Cast away const to match WasmEdge_VMGetStoreContext signature
+    WasmEdge_StoreContext *StoreCxt =
+        WasmEdge_VMGetStoreContext(const_cast<WasmEdge_VMContext *>(Cxt));
+    if (!StoreCxt) {
+      return; // Invalid store context
+    }
 
-  const WasmEdge_ModuleInstanceContext *ModInst =
-      WasmEdge_StoreFindModule(StoreCxt, ModuleName);
-  if (ModInst) {
-    fromStoreCxt(StoreCxt)->unregisterModule(genStrView(ModuleName));
-    WasmEdge_ModuleInstanceDelete(
-        const_cast<WasmEdge_ModuleInstanceContext *>(ModInst));
-  }
+    const WasmEdge_ModuleInstanceContext *ModInst =
+        WasmEdge_StoreFindModule(StoreCxt, ModuleName);
+    if (ModInst) {
+      fromStoreCxt(StoreCxt)->unregisterModule(genStrView(ModuleName));
+      WasmEdge_ModuleInstanceDelete(
+          const_cast<WasmEdge_ModuleInstanceContext *>(ModInst));
+    }
+  });
 }
 
 WASMEDGE_CAPI_EXPORT uint32_t
 WasmEdge_VMGetFunctionListLength(const WasmEdge_VMContext *Cxt) {
-  if (Cxt) {
-    if (const auto *ModInst = Cxt->VM.getActiveModule(); ModInst != nullptr) {
-      return ModInst->getFuncExportNum();
-    }
-  }
-  return 0;
+  return runCAPI(
+      [&]() -> uint32_t {
+        if (Cxt) {
+          if (const auto *ModInst = Cxt->VM.getActiveModule();
+              ModInst != nullptr) {
+            return ModInst->getFuncExportNum();
+          }
+        }
+        return 0;
+      },
+      0U);
 }
 
 WASMEDGE_CAPI_EXPORT uint32_t WasmEdge_VMGetFunctionList(
     const WasmEdge_VMContext *Cxt, WasmEdge_String *Names,
     const WasmEdge_FunctionTypeContext **FuncTypes, const uint32_t Len) {
-  if (Cxt) {
-    // Not to use VM::getFunctionList() here because not to allocate the
-    // returned function name strings.
-    const auto *ModInst = Cxt->VM.getActiveModule();
-    if (ModInst != nullptr) {
-      return ModInst->getFuncExports([&](const auto &FuncExp) {
-        uint32_t I = 0;
-        for (auto It = FuncExp.cbegin(); It != FuncExp.cend() && I < Len;
-             It++, I++) {
-          const auto *FuncInst = It->second;
-          const auto &FuncType = FuncInst->getFuncType();
-          if (Names) {
-            Names[I] = WasmEdge_String{
-                /* Length */ static_cast<uint32_t>(It->first.length()),
-                /* Buf */ It->first.data()};
-          }
-          if (FuncTypes) {
-            FuncTypes[I] = toFuncTypeCxt(&FuncType);
+  return runCAPI(
+      [&]() -> uint32_t {
+        if (Cxt) {
+          // Not to use VM::getFunctionList() here because not to allocate the
+          // returned function name strings.
+          const auto *ModInst = Cxt->VM.getActiveModule();
+          if (ModInst != nullptr) {
+            return ModInst->getFuncExports([&](const auto &FuncExp) {
+              uint32_t I = 0;
+              for (auto It = FuncExp.cbegin(); It != FuncExp.cend() && I < Len;
+                   It++, I++) {
+                const auto *FuncInst = It->second;
+                const auto &FuncType = FuncInst->getFuncType();
+                if (Names) {
+                  Names[I] = WasmEdge_String{
+                      /* Length */ static_cast<uint32_t>(It->first.length()),
+                      /* Buf */ It->first.data()};
+                }
+                if (FuncTypes) {
+                  FuncTypes[I] = toFuncTypeCxt(&FuncType);
+                }
+              }
+              return static_cast<uint32_t>(FuncExp.size());
+            });
           }
         }
-        return static_cast<uint32_t>(FuncExp.size());
-      });
-    }
-  }
-  return 0;
+        return 0;
+      },
+      0U);
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_ModuleInstanceContext *
