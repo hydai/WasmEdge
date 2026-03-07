@@ -37,6 +37,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -463,7 +464,22 @@ inline T runCAPI(F &&Func, T Fallback) noexcept {
     return Fallback;
   }
 }
-template <typename F> inline void runCAPI(F &&Func) noexcept {
+template <typename F,
+          typename R = std::invoke_result_t<std::decay_t<F>>,
+          std::enable_if_t<!std::is_void_v<R>, int> = 0>
+inline R runCAPI(F &&Func) noexcept {
+  try {
+    maybeThrowCAPIExceptionForTest();
+    return std::forward<F>(Func)();
+  } catch (...) {
+    logUnhandledCAPIException();
+    return R{};
+  }
+}
+template <typename F,
+          typename R = std::invoke_result_t<std::decay_t<F>>,
+          std::enable_if_t<std::is_void_v<R>, int> = 0>
+inline void runCAPI(F &&Func) noexcept {
   try {
     maybeThrowCAPIExceptionForTest();
     std::forward<F>(Func)();
@@ -1043,8 +1059,7 @@ WasmEdge_ResultGetMessage(const WasmEdge_Result Res) {
 // >>>>>>>> WasmEdge configure functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 WASMEDGE_CAPI_EXPORT WasmEdge_ConfigureContext *WasmEdge_ConfigureCreate(void) {
-  return runCAPI([]() { return new WasmEdge_ConfigureContext; },
-                 static_cast<WasmEdge_ConfigureContext *>(nullptr));
+  return runCAPI([]() { return new WasmEdge_ConfigureContext; });
 }
 
 WASMEDGE_CAPI_EXPORT void
@@ -1299,8 +1314,7 @@ WasmEdge_ConfigureDelete(WasmEdge_ConfigureContext *Cxt) {
 WASMEDGE_CAPI_EXPORT WasmEdge_StatisticsContext *
 WasmEdge_StatisticsCreate(void) {
   return runCAPI(
-      []() { return toStatCxt(new WasmEdge::Statistics::Statistics); },
-      static_cast<WasmEdge_StatisticsContext *>(nullptr));
+      []() { return toStatCxt(new WasmEdge::Statistics::Statistics); });
 }
 
 WASMEDGE_CAPI_EXPORT uint64_t
@@ -1421,8 +1435,7 @@ WasmEdge_ASTModuleDelete(WasmEdge_ASTModuleContext *Cxt) {
 WASMEDGE_CAPI_EXPORT WasmEdge_LimitContext *
 WasmEdge_LimitCreate(const uint64_t Min, const bool Is64Bit) {
   return runCAPI(
-      [&]() { return toLimitCxt(new WasmEdge::AST::Limit(Min, Is64Bit)); },
-      static_cast<WasmEdge_LimitContext *>(nullptr));
+      [&]() { return toLimitCxt(new WasmEdge::AST::Limit(Min, Is64Bit)); });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_LimitContext *
@@ -1432,8 +1445,7 @@ WasmEdge_LimitCreateWithMax(const uint64_t Min, const uint64_t Max,
       [&]() {
         return toLimitCxt(
             new WasmEdge::AST::Limit(Min, Max, Is64Bit, IsShared));
-      },
-      static_cast<WasmEdge_LimitContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT uint64_t
@@ -1524,8 +1536,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_FunctionTypeContext *WasmEdge_FunctionTypeCreate(
           Cxt->getReturnTypes()[I] = genValType(ReturnList[I]);
         }
         return toFuncTypeCxt(Cxt.release());
-      },
-      static_cast<WasmEdge_FunctionTypeContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT uint32_t WasmEdge_FunctionTypeGetParametersLength(
@@ -1590,8 +1601,7 @@ WasmEdge_TableTypeCreate(const WasmEdge_ValType RefType,
               new WasmEdge::AST::TableType(RT, *fromLimitCxt(Limit)));
         }
         return static_cast<WasmEdge_TableTypeContext *>(nullptr);
-      },
-      static_cast<WasmEdge_TableTypeContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_ValType
@@ -1628,8 +1638,7 @@ WasmEdge_MemoryTypeCreate(const WasmEdge_LimitContext *Limit) {
               new WasmEdge::AST::MemoryType(*fromLimitCxt(Limit)));
         }
         return static_cast<WasmEdge_MemoryTypeContext *>(nullptr);
-      },
-      static_cast<WasmEdge_MemoryTypeContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_LimitContext *
@@ -1671,8 +1680,7 @@ WasmEdge_GlobalTypeCreate(const WasmEdge_ValType ValType,
       [&]() {
         return toGlobTypeCxt(new WasmEdge::AST::GlobalType(
             genValType(ValType), static_cast<WasmEdge::ValMut>(Mut)));
-      },
-      static_cast<WasmEdge_GlobalTypeContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_ValType
@@ -1977,8 +1985,7 @@ WasmEdge_CompilerCreate(const WasmEdge_ConfigureContext *ConfCxt
                                            : WasmEdge::Configure();
         CopyConf.getRuntimeConfigure().setForceInterpreter(true);
         return new WasmEdge_CompilerContext(CopyConf);
-      },
-      static_cast<WasmEdge_CompilerContext *>(nullptr));
+      });
 #else
   return nullptr;
 #endif
@@ -2068,8 +2075,7 @@ WasmEdge_LoaderCreate(const WasmEdge_ConfigureContext *ConfCxt) {
         }
         return toLoaderCxt(new WasmEdge::Loader::Loader(
             WasmEdge::Configure(), &WasmEdge::Executor::Executor::Intrinsics));
-      },
-      static_cast<WasmEdge_LoaderContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Result WasmEdge_LoaderParseFromFile(
@@ -2137,8 +2143,7 @@ WasmEdge_ValidatorCreate(const WasmEdge_ConfigureContext *ConfCxt) {
         }
         return toValidatorCxt(
             new WasmEdge::Validator::Validator(WasmEdge::Configure()));
-      },
-      static_cast<WasmEdge_ValidatorContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Result
@@ -2178,8 +2183,7 @@ WasmEdge_ExecutorCreate(const WasmEdge_ConfigureContext *ConfCxt,
         }
         return toExecutorCxt(
             new WasmEdge::Executor::Executor(WasmEdge::Configure()));
-      },
-      static_cast<WasmEdge_ExecutorContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Result WasmEdge_ExecutorInstantiate(
@@ -2249,8 +2253,7 @@ WasmEdge_ExecutorAsyncInvoke(WasmEdge_ExecutorContext *Cxt,
               fromFuncCxt(FuncCxt), ParamPair.first, ParamPair.second));
         }
         return static_cast<WasmEdge_Async *>(nullptr);
-      },
-      static_cast<WasmEdge_Async *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT void
@@ -2264,8 +2267,7 @@ WasmEdge_ExecutorDelete(WasmEdge_ExecutorContext *Cxt) {
 
 WASMEDGE_CAPI_EXPORT WasmEdge_StoreContext *WasmEdge_StoreCreate(void) {
   return runCAPI(
-      []() { return toStoreCxt(new WasmEdge::Runtime::StoreManager); },
-      static_cast<WasmEdge_StoreContext *>(nullptr));
+      []() { return toStoreCxt(new WasmEdge::Runtime::StoreManager); });
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_ModuleInstanceContext *
@@ -2309,8 +2311,7 @@ WasmEdge_ModuleInstanceCreate(const WasmEdge_String ModuleName) {
       [&]() {
         return toModCxt(new WasmEdge::Runtime::Instance::ModuleInstance(
             genStrView(ModuleName)));
-      },
-      static_cast<WasmEdge_ModuleInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_ModuleInstanceContext *
@@ -2332,8 +2333,7 @@ WasmEdge_ModuleInstanceCreateWASIWithFds(
                         Result.error());
         }
         return toModCxt(WasiMod.release());
-      },
-      static_cast<WasmEdge_ModuleInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_ModuleInstanceContext *
@@ -2351,8 +2351,7 @@ WasmEdge_ModuleInstanceCreateWASI(const char *const *Args,
         WasiMod->init(InitData.Preopens, InitData.ProgramName, InitData.Args,
                       InitData.Envs);
         return toModCxt(WasiMod.release());
-      },
-      static_cast<WasmEdge_ModuleInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT extern WasmEdge_ModuleInstanceContext *
@@ -2363,8 +2362,7 @@ WasmEdge_ModuleInstanceCreateWithData(const WasmEdge_String ModuleName,
       [&]() {
         return toModCxt(new WasmEdge::Runtime::Instance::ModuleInstance(
             genStrView(ModuleName), HostData, wrapHostDataFinalizer(Finalizer)));
-      },
-      static_cast<WasmEdge_ModuleInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_ModuleInstanceInitWASI(
@@ -2694,8 +2692,7 @@ WasmEdge_FunctionInstanceCreate(const WasmEdge_FunctionTypeContext *Type,
                                              Data, Cost)));
         }
         return static_cast<WasmEdge_FunctionInstanceContext *>(nullptr);
-      },
-      static_cast<WasmEdge_FunctionInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_FunctionInstanceContext *
@@ -2711,8 +2708,7 @@ WasmEdge_FunctionInstanceCreateBinding(const WasmEdge_FunctionTypeContext *Type,
                                              Binding, Data, Cost)));
         }
         return static_cast<WasmEdge_FunctionInstanceContext *>(nullptr);
-      },
-      static_cast<WasmEdge_FunctionInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_FunctionTypeContext *
@@ -2756,8 +2752,7 @@ WasmEdge_TableInstanceCreate(const WasmEdge_TableTypeContext *TabType) {
               new WasmEdge::Runtime::Instance::TableInstance(TType));
         }
         return static_cast<WasmEdge_TableInstanceContext *>(nullptr);
-      },
-      static_cast<WasmEdge_TableInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT extern WasmEdge_TableInstanceContext *
@@ -2785,8 +2780,7 @@ WasmEdge_TableInstanceCreateWithInit(const WasmEdge_TableTypeContext *TabType,
               new WasmEdge::Runtime::Instance::TableInstance(TType, Val));
         }
         return static_cast<WasmEdge_TableInstanceContext *>(nullptr);
-      },
-      static_cast<WasmEdge_TableInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_TableTypeContext *
@@ -2880,8 +2874,7 @@ WasmEdge_MemoryInstanceCreate(const WasmEdge_MemoryTypeContext *MemType) {
               *fromMemTypeCxt(MemType)));
         }
         return static_cast<WasmEdge_MemoryInstanceContext *>(nullptr);
-      },
-      static_cast<WasmEdge_MemoryInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_MemoryTypeContext *
@@ -3012,8 +3005,7 @@ WasmEdge_GlobalInstanceCreate(const WasmEdge_GlobalTypeContext *GlobType,
               new WasmEdge::Runtime::Instance::GlobalInstance(GType, Val));
         }
         return static_cast<WasmEdge_GlobalInstanceContext *>(nullptr);
-      },
-      static_cast<WasmEdge_GlobalInstanceContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_GlobalTypeContext *
@@ -3152,8 +3144,7 @@ WasmEdge_AsyncGetReturnsLength(const WasmEdge_Async *Cxt) {
           }
         }
         return 0U;
-      },
-      0U);
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Result
@@ -3189,8 +3180,7 @@ WasmEdge_VMCreate(const WasmEdge_ConfigureContext *ConfCxt,
                                         *fromStoreCxt(StoreCxt));
         }
         return new WasmEdge_VMContext(WasmEdge::Configure());
-      },
-      static_cast<WasmEdge_VMContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Result WasmEdge_VMRegisterModuleFromFile(
@@ -3306,8 +3296,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Async *WasmEdge_VMAsyncRunWasmFromFile(
               ParamPair.first, ParamPair.second));
         }
         return static_cast<WasmEdge_Async *>(nullptr);
-      },
-      static_cast<WasmEdge_Async *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Async *WasmEdge_VMAsyncRunWasmFromBuffer(
@@ -3331,8 +3320,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Async *WasmEdge_VMAsyncRunWasmFromBytes(
               ParamPair.first, ParamPair.second));
         }
         return static_cast<WasmEdge_Async *>(nullptr);
-      },
-      static_cast<WasmEdge_Async *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Async *WasmEdge_VMAsyncRunWasmFromASTModule(
@@ -3348,8 +3336,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Async *WasmEdge_VMAsyncRunWasmFromASTModule(
               ParamPair.second));
         }
         return static_cast<WasmEdge_Async *>(nullptr);
-      },
-      static_cast<WasmEdge_Async *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Result
@@ -3428,8 +3415,7 @@ WasmEdge_VMAsyncExecute(WasmEdge_VMContext *Cxt, const WasmEdge_String FuncName,
               genStrView(FuncName), ParamPair.first, ParamPair.second));
         }
         return static_cast<WasmEdge_Async *>(nullptr);
-      },
-      static_cast<WasmEdge_Async *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_Async *WasmEdge_VMAsyncExecuteRegistered(
@@ -3445,8 +3431,7 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Async *WasmEdge_VMAsyncExecuteRegistered(
                                    ParamPair.first, ParamPair.second));
         }
         return static_cast<WasmEdge_Async *>(nullptr);
-      },
-      static_cast<WasmEdge_Async *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_FunctionTypeContext *
@@ -3465,8 +3450,7 @@ WasmEdge_VMGetFunctionType(const WasmEdge_VMContext *Cxt,
           }
         }
         return nullptr;
-      },
-      static_cast<const WasmEdge_FunctionTypeContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT const WasmEdge_FunctionTypeContext *
@@ -3487,8 +3471,7 @@ WasmEdge_VMGetFunctionTypeRegistered(const WasmEdge_VMContext *Cxt,
           }
         }
         return nullptr;
-      },
-      static_cast<const WasmEdge_FunctionTypeContext *>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_VMCleanup(WasmEdge_VMContext *Cxt) {
@@ -3533,8 +3516,7 @@ WasmEdge_VMGetFunctionListLength(const WasmEdge_VMContext *Cxt) {
           }
         }
         return 0;
-      },
-      0U);
+      });
 }
 
 WASMEDGE_CAPI_EXPORT uint32_t WasmEdge_VMGetFunctionList(
@@ -3567,8 +3549,7 @@ WASMEDGE_CAPI_EXPORT uint32_t WasmEdge_VMGetFunctionList(
           }
         }
         return 0;
-      },
-      0U);
+      });
 }
 
 WASMEDGE_CAPI_EXPORT WasmEdge_ModuleInstanceContext *
@@ -3697,8 +3678,7 @@ WasmEdge_Driver_ArgvCreate(int Argc, const wchar_t *Argv[]) {
           StringBuffer = StringBuffer.subspan(Res);
         }
         return reinterpret_cast<const char **>(Buffer.release());
-      },
-      static_cast<const char **>(nullptr));
+      });
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_Driver_ArgvDelete(const char *Argv[]) {

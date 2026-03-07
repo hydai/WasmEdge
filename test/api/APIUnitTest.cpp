@@ -45,7 +45,7 @@ void setCAPIThrowCountdown(int32_t Count) {
 
 class ScopedCAPIThrowHook {
 public:
-  explicit ScopedCAPIThrowHook(int32_t Count) noexcept { setCAPIThrowCountdown(Count); }
+  explicit ScopedCAPIThrowHook(int32_t Count) { setCAPIThrowCountdown(Count); }
   ~ScopedCAPIThrowHook() { setCAPIThrowCountdown(-1); }
   ScopedCAPIThrowHook(const ScopedCAPIThrowHook &) = delete;
   ScopedCAPIThrowHook &operator=(const ScopedCAPIThrowHook &) = delete;
