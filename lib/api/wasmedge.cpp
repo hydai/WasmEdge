@@ -386,7 +386,7 @@ inline bool isContext(T *Cxt, Args *...Cxts) noexcept {
   return isContext(Cxt) && isContext(Cxts...);
 }
 inline void reportCAPIException(const char *Msg,
-                                 const bool UseSpdlog) noexcept {
+                                const bool UseSpdlog) noexcept {
   using namespace std::literals::string_view_literals;
   static thread_local bool IsReporting = false;
   if (UseSpdlog && !IsReporting) {
@@ -692,36 +692,40 @@ WASMEDGE_CAPI_EXPORT uint32_t WasmEdge_VersionGetPatch(void) {
 // >>>>>>>> WasmEdge logging functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_LogSetErrorLevel(void) {
-  WasmEdge::Log::setErrorLoggingLevel();
+  runCAPI([]() { WasmEdge::Log::setErrorLoggingLevel(); });
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_LogSetDebugLevel(void) {
-  WasmEdge::Log::setDebugLoggingLevel();
+  runCAPI([]() { WasmEdge::Log::setDebugLoggingLevel(); });
 }
 
-WASMEDGE_CAPI_EXPORT void WasmEdge_LogOff(void) { WasmEdge::Log::setLogOff(); }
+WASMEDGE_CAPI_EXPORT void WasmEdge_LogOff(void) {
+  runCAPI([]() { WasmEdge::Log::setLogOff(); });
+}
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_LogSetLevel(WasmEdge_LogLevel Level) {
-  switch (Level) {
-  case WasmEdge_LogLevel_Trace:
-    WasmEdge::Log::setTraceLoggingLevel();
-    break;
-  case WasmEdge_LogLevel_Debug:
-    WasmEdge::Log::setDebugLoggingLevel();
-    break;
-  case WasmEdge_LogLevel_Info:
-    WasmEdge::Log::setInfoLoggingLevel();
-    break;
-  case WasmEdge_LogLevel_Warn:
-    WasmEdge::Log::setWarnLoggingLevel();
-    break;
-  case WasmEdge_LogLevel_Error:
-    WasmEdge::Log::setErrorLoggingLevel();
-    break;
-  case WasmEdge_LogLevel_Critical:
-    WasmEdge::Log::setCriticalLoggingLevel();
-    break;
-  }
+  runCAPI([&]() {
+    switch (Level) {
+    case WasmEdge_LogLevel_Trace:
+      WasmEdge::Log::setTraceLoggingLevel();
+      break;
+    case WasmEdge_LogLevel_Debug:
+      WasmEdge::Log::setDebugLoggingLevel();
+      break;
+    case WasmEdge_LogLevel_Info:
+      WasmEdge::Log::setInfoLoggingLevel();
+      break;
+    case WasmEdge_LogLevel_Warn:
+      WasmEdge::Log::setWarnLoggingLevel();
+      break;
+    case WasmEdge_LogLevel_Error:
+      WasmEdge::Log::setErrorLoggingLevel();
+      break;
+    case WasmEdge_LogLevel_Critical:
+      WasmEdge::Log::setCriticalLoggingLevel();
+      break;
+    }
+  });
 }
 
 WASMEDGE_CAPI_EXPORT void
@@ -958,11 +962,9 @@ WASMEDGE_CAPI_EXPORT uint32_t WasmEdge_StringCopy(const WasmEdge_String Str,
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_StringDelete(WasmEdge_String Str) {
-  cleanupCAPI([&]() {
-    if (Str.Buf) {
-      delete[] Str.Buf;
-    }
-  });
+  if (Str.Buf) {
+    delete[] Str.Buf;
+  }
 }
 
 // <<<<<<<< WasmEdge string functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
@@ -989,11 +991,9 @@ WASMEDGE_CAPI_EXPORT WasmEdge_Bytes WasmEdge_BytesWrap(const uint8_t *Buf,
 }
 
 WASMEDGE_CAPI_EXPORT void WasmEdge_BytesDelete(WasmEdge_Bytes Bytes) {
-  cleanupCAPI([&]() {
-    if (Bytes.Buf) {
-      delete[] Bytes.Buf;
-    }
-  });
+  if (Bytes.Buf) {
+    delete[] Bytes.Buf;
+  }
 }
 
 // <<<<<<<< WasmEdge bytes functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
