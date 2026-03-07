@@ -108,6 +108,10 @@ target_include_directories(wasmedgeCAPI
   ${PROJECT_SOURCE_DIR}/include/api
 )
 
+if(WASMEDGE_BUILD_TESTS)
+  target_compile_definitions(wasmedgeCAPI PRIVATE WASMEDGE_CAPI_TEST_HOOKS)
+endif()
+
 if(WASMEDGE_BUILD_SHARED_LIB)
   wasmedge_add_library(wasmedge_shared SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include/api/wasmedge/wasmedge.h

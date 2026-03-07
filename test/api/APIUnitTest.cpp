@@ -7,12 +7,15 @@
 #include "wasmedge/wasmedge.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <new>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,6 +27,29 @@
 using namespace std::literals;
 
 namespace {
+
+void setCAPIThrowCountdown(int32_t Count) {
+  static std::atomic<uint64_t> ThrowCookie{0};
+  const auto Cookie =
+      ThrowCookie.fetch_add(1, std::memory_order_relaxed) + 1U;
+  const auto CountString = std::to_string(Count);
+  const auto CookieString = std::to_string(Cookie);
+#if WASMEDGE_OS_WINDOWS
+  _putenv_s("WASMEDGE_CAPI_THROW_COUNTDOWN", CountString.c_str());
+  _putenv_s("WASMEDGE_CAPI_THROW_COOKIE", CookieString.c_str());
+#else
+  setenv("WASMEDGE_CAPI_THROW_COUNTDOWN", CountString.c_str(), 1);
+  setenv("WASMEDGE_CAPI_THROW_COOKIE", CookieString.c_str(), 1);
+#endif
+}
+
+class ScopedCAPIThrowHook {
+public:
+  explicit ScopedCAPIThrowHook(int32_t Count) { setCAPIThrowCountdown(Count); }
+  ~ScopedCAPIThrowHook() { setCAPIThrowCountdown(-1); }
+  ScopedCAPIThrowHook(const ScopedCAPIThrowHook &) = delete;
+  ScopedCAPIThrowHook &operator=(const ScopedCAPIThrowHook &) = delete;
+};
 
 std::vector<uint8_t> TestWasm = {
     0x0,  0x61, 0x73, 0x6d, 0x1,  0x0,  0x0,  0x0,  0x1,  0x1d, 0x5,  0x60,
@@ -279,6 +305,17 @@ WasmEdge_Result externFail(void *, const WasmEdge_CallingFrameContext *,
   Out[0] = WasmEdge_ValueGenI32(5678);
   return WasmEdge_ResultGen(WasmEdge_ErrCategory_UserLevelError, 0x5678);
 }
+
+WasmEdge_Result externThrow(void *, const WasmEdge_CallingFrameContext *,
+                            const WasmEdge_Value *, WasmEdge_Value *) {
+  throw std::bad_alloc();
+}
+
+void throwingFinalizer(void *) { throw std::bad_alloc(); }
+
+void throwingLogCallback(const WasmEdge_LogMessage *) { throw std::bad_alloc(); }
+
+void noopLogCallback(const WasmEdge_LogMessage *) {}
 
 WasmEdge_Result externWrap(void *This, void *Data,
                            const WasmEdge_CallingFrameContext *MemCxt,
@@ -542,7 +579,7 @@ TEST(APICoreTest, Value) {
   Val = WasmEdge_ValueGenF64(-std::numeric_limits<double>::infinity());
   EXPECT_EQ(WasmEdge_ValueGetF64(Val),
             -std::numeric_limits<double>::infinity());
-#if defined(__x86_64__) || defined(__aarch64__) || defined(__s390x__) || \
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__s390x__) ||       \
     (defined(__riscv) && __riscv_xlen == 64)
   Val = WasmEdge_ValueGenV128(static_cast<int128_t>(INT64_MAX) * 2 + 1);
   EXPECT_EQ(WasmEdge_ValueGetV128(Val),
@@ -621,6 +658,256 @@ TEST(APICoreTest, Bytes) {
   EXPECT_EQ(Buf5.Length, 8U);
   EXPECT_EQ(Buf5.Buf, CBuf);
   WasmEdge_BytesDelete(Buf1);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyFallbacks) {
+  const char CStr[] = "abc";
+  const uint8_t CBuf[] = {'a', 'b', 'c'};
+
+  WasmEdge_String Str = {/* Length */ 7, /* Buf */ CStr};
+  {
+    ScopedCAPIThrowHook Hook(0);
+    Str = WasmEdge_StringCreateByBuffer(CStr, 3);
+  }
+  EXPECT_EQ(Str.Length, 0U);
+  EXPECT_EQ(Str.Buf, nullptr);
+
+  WasmEdge_Bytes Bytes = {/* Length */ 7, /* Buf */ CBuf};
+  {
+    ScopedCAPIThrowHook Hook(0);
+    Bytes = WasmEdge_BytesCreate(CBuf, 3);
+  }
+  EXPECT_EQ(Bytes.Length, 0U);
+  EXPECT_EQ(Bytes.Buf, nullptr);
+
+  WasmEdge_ConfigureContext *Conf =
+      reinterpret_cast<WasmEdge_ConfigureContext *>(1);
+  {
+    ScopedCAPIThrowHook Hook(0);
+    Conf = WasmEdge_ConfigureCreate();
+  }
+  EXPECT_EQ(Conf, nullptr);
+
+  WasmEdge_FunctionTypeContext *FuncType =
+      reinterpret_cast<WasmEdge_FunctionTypeContext *>(1);
+  {
+    ScopedCAPIThrowHook Hook(0);
+    FuncType = WasmEdge_FunctionTypeCreate(nullptr, 0, nullptr, 0);
+  }
+  EXPECT_EQ(FuncType, nullptr);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyResultAndVoid) {
+  hexToFile(TestWasm, TPath);
+  WasmEdge_LoaderContext *Loader = WasmEdge_LoaderCreate(nullptr);
+  ASSERT_NE(Loader, nullptr);
+
+  WasmEdge_ASTModuleContext *Mod = nullptr;
+  WasmEdge_Result Res = WasmEdge_Result_Success;
+  {
+    ScopedCAPIThrowHook Hook(0);
+    Res = WasmEdge_LoaderParseFromFile(Loader, &Mod, TPath);
+  }
+  EXPECT_TRUE(isErrMatch(WasmEdge_ErrCode_RuntimeError, Res));
+  EXPECT_EQ(Mod, nullptr);
+  WasmEdge_LoaderDelete(Loader);
+
+  WasmEdge_ModuleInstanceContext *WasiMod =
+      WasmEdge_ModuleInstanceCreateWASI(nullptr, 0, nullptr, 0, nullptr, 0);
+  ASSERT_NE(WasiMod, nullptr);
+  bool Threw = false;
+  {
+    ScopedCAPIThrowHook Hook(0);
+    try {
+      WasmEdge_ModuleInstanceInitWASI(WasiMod, Args, 2, Envs, 3, Preopens, 5);
+    } catch (...) {
+      Threw = true;
+    }
+  }
+  EXPECT_FALSE(Threw);
+  WasmEdge_ModuleInstanceDelete(WasiMod);
+
+  WasmEdge_StatisticsContext *Stat = WasmEdge_StatisticsCreate();
+  ASSERT_NE(Stat, nullptr);
+  uint64_t CostTable[2] = {1, 2};
+  Threw = false;
+  {
+    ScopedCAPIThrowHook Hook(0);
+    try {
+      WasmEdge_StatisticsSetCostTable(Stat, CostTable, 2);
+    } catch (...) {
+      Threw = true;
+    }
+  }
+  EXPECT_FALSE(Threw);
+  WasmEdge_StatisticsDelete(Stat);
+
+  Threw = false;
+  {
+    ScopedCAPIThrowHook Hook(0);
+    try {
+      WasmEdge_LogSetCallback(noopLogCallback);
+    } catch (...) {
+      Threw = true;
+    }
+  }
+  EXPECT_FALSE(Threw);
+  WasmEdge_LogSetCallback(nullptr);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyHostFunctionThrow) {
+  WasmEdge_ExecutorContext *Exec = WasmEdge_ExecutorCreate(nullptr, nullptr);
+  WasmEdge_StoreContext *Store = WasmEdge_StoreCreate();
+  ASSERT_NE(Exec, nullptr);
+  ASSERT_NE(Store, nullptr);
+
+  WasmEdge_ModuleInstanceContext *HostMod =
+      WasmEdge_ModuleInstanceCreate(WasmEdge_StringWrap("thrower", 7));
+  ASSERT_NE(HostMod, nullptr);
+
+  WasmEdge_ValType Result[1] = {WasmEdge_ValTypeGenI32()};
+  WasmEdge_FunctionTypeContext *FuncType =
+      WasmEdge_FunctionTypeCreate(nullptr, 0, Result, 1);
+  ASSERT_NE(FuncType, nullptr);
+
+  WasmEdge_FunctionInstanceContext *FuncInst =
+      WasmEdge_FunctionInstanceCreate(FuncType, externThrow, nullptr, 0);
+  ASSERT_NE(FuncInst, nullptr);
+
+  const WasmEdge_String FuncName = WasmEdge_StringWrap("throw", 5);
+  WasmEdge_ModuleInstanceAddFunction(HostMod, FuncName, FuncInst);
+  EXPECT_TRUE(
+      WasmEdge_ResultOK(WasmEdge_ExecutorRegisterImport(Exec, Store, HostMod)));
+
+  FuncInst = WasmEdge_ModuleInstanceFindFunction(HostMod, FuncName);
+  ASSERT_NE(FuncInst, nullptr);
+
+  WasmEdge_Value Ret = WasmEdge_ValueGenI32(0);
+  WasmEdge_Result Res = WasmEdge_Result_Success;
+  bool Threw = false;
+  try {
+    Res = WasmEdge_ExecutorInvoke(Exec, FuncInst, nullptr, 0, &Ret, 1);
+  } catch (...) {
+    Threw = true;
+  }
+  EXPECT_FALSE(Threw);
+  EXPECT_TRUE(isErrMatch(WasmEdge_ErrCode_RuntimeError, Res));
+
+  Res = WasmEdge_Result_Success;
+  Threw = false;
+  {
+    ScopedCAPIThrowHook Hook(1);
+    try {
+      Res = WasmEdge_ExecutorInvoke(Exec, FuncInst, nullptr, 0, &Ret, 1);
+    } catch (...) {
+      Threw = true;
+    }
+  }
+  EXPECT_FALSE(Threw);
+  EXPECT_TRUE(isErrMatch(WasmEdge_ErrCode_RuntimeError, Res));
+
+  WasmEdge_FunctionTypeDelete(FuncType);
+  WasmEdge_ModuleInstanceDelete(HostMod);
+  WasmEdge_StoreDelete(Store);
+  WasmEdge_ExecutorDelete(Exec);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyDeleteFinalizer) {
+  WasmEdge_ModuleInstanceContext *HostMod =
+      WasmEdge_ModuleInstanceCreateWithData(WasmEdge_StringWrap("thrower", 7),
+                                            nullptr, throwingFinalizer);
+  ASSERT_NE(HostMod, nullptr);
+
+  bool Threw = false;
+  try {
+    WasmEdge_ModuleInstanceDelete(HostMod);
+  } catch (...) {
+    Threw = true;
+  }
+  EXPECT_FALSE(Threw);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyThrowingLogCallback) {
+  WasmEdge_ValType VType = WasmEdge_ValTypeGenExternRef();
+  VType.Data[2] = WasmEdge_TypeCode_Ref;
+  WasmEdge_LimitContext *TabLim = WasmEdge_LimitCreate(10, false);
+  ASSERT_NE(TabLim, nullptr);
+  WasmEdge_TableTypeContext *TabType = WasmEdge_TableTypeCreate(VType, TabLim);
+  ASSERT_NE(TabType, nullptr);
+
+  WasmEdge_LogSetErrorLevel();
+  WasmEdge_LogSetCallback(throwingLogCallback);
+
+  WasmEdge_TableInstanceContext *TabCxt = nullptr;
+  bool Threw = false;
+  try {
+    TabCxt = WasmEdge_TableInstanceCreate(TabType);
+  } catch (...) {
+    Threw = true;
+  }
+  EXPECT_FALSE(Threw);
+  EXPECT_EQ(TabCxt, nullptr);
+
+  if (TabCxt) {
+    WasmEdge_TableInstanceDelete(TabCxt);
+  }
+  WasmEdge_TableTypeDelete(TabType);
+  WasmEdge_LimitDelete(TabLim);
+  WasmEdge_LogSetCallback(nullptr);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyPartialFailure) {
+  // Test that exceptions thrown midway through multi-step operations
+  // do not leak resources or corrupt state. We use various countdown
+  // values to trigger the throw at different points.
+  hexToFile(TestWasm, TPath);
+
+  for (int32_t Countdown = 0; Countdown <= 5; ++Countdown) {
+    // VM creation + load + validate + instantiate is a multi-step operation.
+    // Triggering a throw at various points should not leak or crash.
+    WasmEdge_ConfigureContext *Conf = WasmEdge_ConfigureCreate();
+    ASSERT_NE(Conf, nullptr);
+    WasmEdge_ConfigureAddHostRegistration(Conf, WasmEdge_HostRegistration_Wasi);
+
+    bool Threw = false;
+    WasmEdge_VMContext *VM = nullptr;
+    {
+      ScopedCAPIThrowHook Hook(Countdown);
+      try {
+        VM = WasmEdge_VMCreate(Conf, nullptr);
+      } catch (...) {
+        Threw = true;
+      }
+    }
+    EXPECT_FALSE(Threw);
+    // VM might be nullptr if the throw happened during creation.
+    if (VM) {
+      WasmEdge_VMDelete(VM);
+    }
+    WasmEdge_ConfigureDelete(Conf);
+  }
+
+  for (int32_t Countdown = 1; Countdown <= 5; ++Countdown) {
+    // Test that loader operations with various throw points are safe.
+    WasmEdge_LoaderContext *Loader = WasmEdge_LoaderCreate(nullptr);
+    ASSERT_NE(Loader, nullptr);
+
+    WasmEdge_ASTModuleContext *Mod = nullptr;
+    bool Threw = false;
+    {
+      ScopedCAPIThrowHook Hook(Countdown);
+      try {
+        WasmEdge_LoaderParseFromFile(Loader, &Mod, TPath);
+      } catch (...) {
+        Threw = true;
+      }
+    }
+    EXPECT_FALSE(Threw);
+    if (Mod) {
+      WasmEdge_ASTModuleDelete(Mod);
+    }
+    WasmEdge_LoaderDelete(Loader);
+  }
 }
 
 TEST(APICoreTest, Result) {
@@ -2395,6 +2682,7 @@ TEST(APICoreTest, ModuleInstance) {
     fmt::print("Data address: {}\n"sv, Data);
   };
   WasmEdge_ValType Param[2], Result[1];
+  const char *ArgsWithNullProgram[2] = {nullptr, "second"};
 
   // Create module instance with name ""
   HostMod = WasmEdge_ModuleInstanceCreate({/* Length */ 0, /* Buf */ nullptr});
@@ -2510,6 +2798,11 @@ TEST(APICoreTest, ModuleInstance) {
   EXPECT_NE(HostMod, nullptr);
   WasmEdge_ModuleInstanceDelete(HostMod);
   HostMod =
+      WasmEdge_ModuleInstanceCreateWASI(ArgsWithNullProgram, 2, Envs, 3,
+                                        Preopens, 5);
+  EXPECT_NE(HostMod, nullptr);
+  WasmEdge_ModuleInstanceDelete(HostMod);
+  HostMod =
       WasmEdge_ModuleInstanceCreateWASI(nullptr, 0, nullptr, 0, nullptr, 0);
   EXPECT_NE(HostMod, nullptr);
   WasmEdge_ModuleInstanceDelete(HostMod);
@@ -2580,6 +2873,9 @@ TEST(APICoreTest, ModuleInstance) {
       WasmEdge_VMGetImportModuleContext(VM, WasmEdge_HostRegistration_Wasi);
   EXPECT_NE(HostMod, nullptr);
   WasmEdge_ModuleInstanceInitWASI(nullptr, Args, 2, Envs, 3, Preopens, 5);
+  EXPECT_TRUE(true);
+  WasmEdge_ModuleInstanceInitWASI(HostMod, ArgsWithNullProgram, 2, Envs, 3,
+                                  Preopens, 5);
   EXPECT_TRUE(true);
   WasmEdge_ModuleInstanceInitWASI(HostMod, Args, 2, Envs, 3, Preopens, 5);
   EXPECT_TRUE(true);
