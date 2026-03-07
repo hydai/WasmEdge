@@ -26,8 +26,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -3527,18 +3527,18 @@ WASMEDGE_CAPI_EXPORT void WasmEdge_VMCleanup(WasmEdge_VMContext *Cxt) {
   });
 }
 
-void WasmEdge_VMForceDeleteRegisteredModule(const WasmEdge_VMContext *Cxt,
-                                            const WasmEdge_String ModuleName) {
+WASMEDGE_CAPI_EXPORT void WasmEdge_VMForceDeleteRegisteredModule(
+    const WasmEdge_VMContext *Cxt, const WasmEdge_String ModuleName) {
   cleanupCAPI([&]() {
     if (!Cxt || !ModuleName.Buf) {
-      return; // Invalid input
+      return;
     }
 
     // Cast away const to match WasmEdge_VMGetStoreContext signature
     WasmEdge_StoreContext *StoreCxt =
         WasmEdge_VMGetStoreContext(const_cast<WasmEdge_VMContext *>(Cxt));
     if (!StoreCxt) {
-      return; // Invalid store context
+      return;
     }
 
     const WasmEdge_ModuleInstanceContext *ModInst =
