@@ -25,37 +25,17 @@
 
 using namespace std::literals;
 
+// Declared in wasmedge.cpp when WASMEDGE_CAPI_TEST_HOOKS is defined.
+extern "C" void WasmEdge_TestSetThrowCountdown(int32_t Count);
+
 namespace {
-
-constexpr const char *CAPIThrowCountdownEnvName =
-    "WASMEDGE_CAPI_TEST_THROW_COUNTDOWN";
-
-inline void setCAPIThrowCountdown(const int32_t Count) noexcept {
-  if (Count < 0) {
-#if WASMEDGE_OS_WINDOWS
-    _putenv_s(CAPIThrowCountdownEnvName, "");
-#else
-    unsetenv(CAPIThrowCountdownEnvName);
-#endif
-    return;
-  }
-
-  char Buffer[12];
-  std::snprintf(Buffer, sizeof(Buffer), "%d", Count);
-
-#if WASMEDGE_OS_WINDOWS
-  _putenv_s(CAPIThrowCountdownEnvName, Buffer);
-#else
-  setenv(CAPIThrowCountdownEnvName, Buffer, 1);
-#endif
-}
 
 class ScopedCAPIThrowHook {
 public:
   explicit ScopedCAPIThrowHook(int32_t Count) noexcept {
-    setCAPIThrowCountdown(Count);
+    WasmEdge_TestSetThrowCountdown(Count);
   }
-  ~ScopedCAPIThrowHook() { setCAPIThrowCountdown(-1); }
+  ~ScopedCAPIThrowHook() { WasmEdge_TestSetThrowCountdown(-1); }
   ScopedCAPIThrowHook(const ScopedCAPIThrowHook &) = delete;
   ScopedCAPIThrowHook &operator=(const ScopedCAPIThrowHook &) = delete;
 };
@@ -815,6 +795,60 @@ TEST(APICoreTest, CAPIExceptionSafetyHostFunctionThrow) {
   WasmEdge_ModuleInstanceDelete(HostMod);
   WasmEdge_StoreDelete(Store);
   WasmEdge_ExecutorDelete(Exec);
+}
+
+TEST(APICoreTest, CAPIExceptionSafetyPartialFailure) {
+  // Test that exceptions thrown midway through multi-step operations
+  // do not leak resources or corrupt state. We use various countdown
+  // values to trigger the throw at different points.
+  hexToFile(TestWasm, TPath);
+
+  for (int32_t Countdown = 0; Countdown <= 5; ++Countdown) {
+    // VM creation + load + validate + instantiate is a multi-step operation.
+    // Triggering a throw at various points should not leak or crash.
+    WasmEdge_ConfigureContext *Conf = WasmEdge_ConfigureCreate();
+    ASSERT_NE(Conf, nullptr);
+    WasmEdge_ConfigureAddHostRegistration(Conf, WasmEdge_HostRegistration_Wasi);
+
+    bool Threw = false;
+    WasmEdge_VMContext *VM = nullptr;
+    {
+      ScopedCAPIThrowHook Hook(Countdown);
+      try {
+        VM = WasmEdge_VMCreate(Conf, nullptr);
+      } catch (...) {
+        Threw = true;
+      }
+    }
+    EXPECT_FALSE(Threw);
+    // VM might be nullptr if the throw happened during creation.
+    if (VM) {
+      WasmEdge_VMDelete(VM);
+    }
+    WasmEdge_ConfigureDelete(Conf);
+  }
+
+  for (int32_t Countdown = 1; Countdown <= 5; ++Countdown) {
+    // Test that loader operations with various throw points are safe.
+    WasmEdge_LoaderContext *Loader = WasmEdge_LoaderCreate(nullptr);
+    ASSERT_NE(Loader, nullptr);
+
+    WasmEdge_ASTModuleContext *Mod = nullptr;
+    bool Threw = false;
+    {
+      ScopedCAPIThrowHook Hook(Countdown);
+      try {
+        WasmEdge_LoaderParseFromFile(Loader, &Mod, TPath);
+      } catch (...) {
+        Threw = true;
+      }
+    }
+    EXPECT_FALSE(Threw);
+    if (Mod) {
+      WasmEdge_ASTModuleDelete(Mod);
+    }
+    WasmEdge_LoaderDelete(Loader);
+  }
 }
 
 TEST(APICoreTest, Result) {

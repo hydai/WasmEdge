@@ -25,15 +25,12 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <functional>
-#include <limits>
 #include <map>
 #include <memory>
 #include <new>
@@ -143,50 +140,27 @@ namespace {
 using namespace WasmEdge;
 
 #ifdef WASMEDGE_CAPI_TEST_HOOKS
-constexpr const char *CAPIThrowCountdownEnvName =
-    "WASMEDGE_CAPI_TEST_THROW_COUNTDOWN";
+// Atomic countdown for fault injection in tests. A value < 0 means disabled.
+// When >= 0, each C API entry point decrements the counter; when it hits 0,
+// a std::bad_alloc is thrown to simulate allocation failure.
+inline std::atomic<int32_t> CAPITestThrowCountdown{-1};
 
 inline void setCAPIThrowCountdownForTest(const int32_t Count) noexcept {
-  if (Count < 0) {
-#if WASMEDGE_OS_WINDOWS
-    _putenv_s(CAPIThrowCountdownEnvName, "");
-#else
-    unsetenv(CAPIThrowCountdownEnvName);
-#endif
-    return;
-  }
-
-  char Buffer[12];
-  std::snprintf(Buffer, sizeof(Buffer), "%d", Count);
-
-#if WASMEDGE_OS_WINDOWS
-  _putenv_s(CAPIThrowCountdownEnvName, Buffer);
-#else
-  setenv(CAPIThrowCountdownEnvName, Buffer, 1);
-#endif
-}
-
-inline bool getCAPIThrowCountdownForTest(int32_t &Count) noexcept {
-  if (const char *Value = std::getenv(CAPIThrowCountdownEnvName)) {
-    errno = 0;
-    char *End = nullptr;
-    const long Parsed = std::strtol(Value, &End, 10);
-    if (End != Value && *End == '\0' && errno != ERANGE &&
-        Parsed >= std::numeric_limits<int32_t>::min() &&
-        Parsed <= std::numeric_limits<int32_t>::max()) {
-      Count = static_cast<int32_t>(Parsed);
-      return true;
-    }
-  }
-  return false;
+  CAPITestThrowCountdown.store(Count, std::memory_order_relaxed);
 }
 
 inline void maybeThrowCAPIExceptionForTest() {
-  int32_t Count = -1;
-  if (!getCAPIThrowCountdownForTest(Count) || Count < 0) {
+  int32_t Count = CAPITestThrowCountdown.load(std::memory_order_relaxed);
+  if (Count < 0) {
     return;
   }
-  setCAPIThrowCountdownForTest(Count - 1);
+  // Atomically decrement; throw when we reach 0.
+  while (!CAPITestThrowCountdown.compare_exchange_weak(
+      Count, Count - 1, std::memory_order_relaxed)) {
+    if (Count < 0) {
+      return;
+    }
+  }
   if (Count == 0) {
     throw std::bad_alloc();
   }
@@ -385,24 +359,20 @@ inline bool isContext(T *Cxt, Args *...Cxts) noexcept {
 }
 inline void logUnhandledCAPIException() noexcept {
   using namespace std::literals::string_view_literals;
+  // Guard: if called outside a catch block, std::current_exception() is null.
+  // In that case, do nothing instead of calling throw; which would terminate.
+  if (!std::current_exception()) {
+    return;
+  }
   try {
     throw;
   } catch (const std::bad_alloc &) {
-    try {
-      spdlog::error("Unhandled std::bad_alloc in WasmEdge C API."sv);
-    } catch (...) {
-    }
+    spdlog::error("Unhandled std::bad_alloc in WasmEdge C API."sv);
   } catch (const std::exception &E) {
-    try {
-      spdlog::error("Unhandled C++ exception in WasmEdge C API: {}"sv,
-                    E.what());
-    } catch (...) {
-    }
+    spdlog::error("Unhandled C++ exception in WasmEdge C API: {}"sv,
+                  E.what());
   } catch (...) {
-    try {
-      spdlog::error("Unhandled unknown exception in WasmEdge C API."sv);
-    } catch (...) {
-    }
+    spdlog::error("Unhandled unknown exception in WasmEdge C API."sv);
   }
 }
 template <typename T, typename F>
@@ -1288,11 +1258,9 @@ WasmEdge_StatisticsGetTotalCost(const WasmEdge_StatisticsContext *Cxt) {
 WASMEDGE_CAPI_EXPORT void
 WasmEdge_StatisticsSetCostTable(WasmEdge_StatisticsContext *Cxt,
                                 uint64_t *CostArr, const uint32_t Len) {
-  runCAPI([&]() {
-    if (Cxt) {
-      fromStatCxt(Cxt)->setCostTable(genSpan(CostArr, Len));
-    }
-  });
+  if (Cxt) {
+    fromStatCxt(Cxt)->setCostTable(genSpan(CostArr, Len));
+  }
 }
 
 WASMEDGE_CAPI_EXPORT void
@@ -3823,6 +3791,17 @@ WASMEDGE_CAPI_EXPORT void WasmEdge_ExecutorExperimentalRegisterPostHostFunction(
 }
 
 // <<<<<<<< WasmEdge Experimental Functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+// >>>>>>>> WasmEdge Test Hook Functions >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+#ifdef WASMEDGE_CAPI_TEST_HOOKS
+WASMEDGE_CAPI_EXPORT void
+WasmEdge_TestSetThrowCountdown(const int32_t Count) {
+  setCAPIThrowCountdownForTest(Count);
+}
+#endif
+
+// <<<<<<<< WasmEdge Test Hook Functions <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 #ifdef __cplusplus
 } // extern "C"
 #endif
