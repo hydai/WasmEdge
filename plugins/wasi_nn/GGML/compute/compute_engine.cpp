@@ -5,17 +5,17 @@
 #include "GGML/tts/tts_core.h"
 #include "inference_manager.h"
 
-#ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_GGML
-#include <mtmd-helper.h>
-#include <mtmd.h>
-#endif
-
 namespace WasmEdge::Host::WASINN::GGML {
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_GGML
 
 Expect<ErrNo> compute(WasiNNEnvironment &Env, uint32_t ContextId) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
+  auto State =
+      Env.getBackendContextGraphOrError<Backend::GGML>(ContextId, "compute"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
   LOG_DEBUG(GraphRef.EnableDebugLog, "compute")
 
   // Clear the context and reset the sampler.
@@ -27,25 +27,9 @@ Expect<ErrNo> compute(WasiNNEnvironment &Env, uint32_t ContextId) noexcept {
 
   // Evaluate the input tokens.
   ErrNo ReturnCode = ErrNo::Success;
-  if (GraphRef.VisionContext == nullptr) {
-    // Text only prompt.
-    ReturnCode = evaluateInput(GraphRef, CxtRef, "compute"sv);
-    if (ReturnCode != ErrNo::Success) {
-      return ReturnCode;
-    }
-  } else {
-    // Multimodal prompt.
-    llama_pos NewNPos;
-    int32_t Res = mtmd_helper_eval_chunks(
-        GraphRef.VisionContext.get(), GraphRef.LlamaContext.get(),
-        GraphRef.VisionInputChunks.get(), CxtRef.NPos,
-        /* seq_id */ 0, static_cast<int32_t>(CxtRef.CurrentBatchSize),
-        /* logits_last */ true, &NewNPos);
-    CxtRef.NPos = NewNPos;
-    if (Res != 0) {
-      RET_ERROR(ErrNo::InvalidArgument,
-                "compute: unable to eval the mtmd prompt."sv)
-    }
+  ReturnCode = evaluatePrompt(GraphRef, CxtRef, "compute"sv);
+  if (ReturnCode != ErrNo::Success) {
+    return ReturnCode;
   }
 
   // Main prediction loop.
@@ -81,7 +65,7 @@ Expect<ErrNo> compute(WasiNNEnvironment &Env, uint32_t ContextId) noexcept {
   }
 
   if (GraphRef.EnableLog) {
-    common_perf_print(GraphRef.LlamaContext.get(), CxtRef.LlamaSampler);
+    common_perf_print(GraphRef.LlamaContext.get(), CxtRef.LlamaSampler.get());
   }
 
   LOG_DEBUG(GraphRef.EnableDebugLog, "compute...Done"sv)
@@ -90,9 +74,14 @@ Expect<ErrNo> compute(WasiNNEnvironment &Env, uint32_t ContextId) noexcept {
 
 Expect<ErrNo> computeSingle(WasiNNEnvironment &Env,
                             uint32_t ContextId) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
-  LOG_DEBUG(GraphRef.EnableDebugLog, "computeSingle"sv)
+  auto State = Env.getBackendContextGraphOrError<Backend::GGML>(
+      ContextId, "compute_single"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
+  LOG_DEBUG(GraphRef.EnableDebugLog, "compute_single"sv)
 
   // New compute single token context.
   auto ReturnCode = ErrNo::Success;
@@ -102,26 +91,9 @@ Expect<ErrNo> computeSingle(WasiNNEnvironment &Env,
     // Clear the context and reset the sampler.
     clearContext(GraphRef, CxtRef);
 
-    // Evaluate the input tokens.
-    if (GraphRef.VisionContext == nullptr) {
-      // Text only prompt.
-      ReturnCode = evaluateInput(GraphRef, CxtRef, "compute"sv);
-      if (ReturnCode != ErrNo::Success) {
-        return ReturnCode;
-      }
-    } else {
-      // Multimodal prompt.
-      llama_pos NewNPos;
-      int32_t Res = mtmd_helper_eval_chunks(
-          GraphRef.VisionContext.get(), GraphRef.LlamaContext.get(),
-          GraphRef.VisionInputChunks.get(), CxtRef.NPos,
-          /* seq_id */ 0, static_cast<int32_t>(CxtRef.CurrentBatchSize),
-          /* logits_last */ true, &NewNPos);
-      CxtRef.NPos = NewNPos;
-      if (Res != 0) {
-        RET_ERROR(ErrNo::InvalidArgument,
-                  "compute: unable to eval the mtmd prompt."sv)
-      }
+    ReturnCode = evaluatePrompt(GraphRef, CxtRef, "compute_single"sv);
+    if (ReturnCode != ErrNo::Success) {
+      return ReturnCode;
     }
   }
 

@@ -10,6 +10,8 @@ void clearContext(Graph &GraphRef, Context &CxtRef) noexcept;
 Expect<ErrNo> getEmbedding(Graph &GraphRef, Context &CxtRef) noexcept;
 ErrNo evaluateInput(Graph &GraphRef, Context &CxtRef,
                     std::string_view LogPrefix) noexcept;
+ErrNo evaluatePrompt(Graph &GraphRef, Context &CxtRef,
+                     std::string_view LogPrefix) noexcept;
 ErrNo sampleOutput(Graph &GraphRef, Context &CxtRef,
                    bool IsSingleTokenMode = false) noexcept;
 #endif

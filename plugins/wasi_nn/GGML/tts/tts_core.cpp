@@ -5,6 +5,7 @@
 #include "host/wasi/vfs_io.h"
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_GGML
+#include <experimental/scope.hpp>
 #include <json-partial.h>
 #include <json-schema-to-grammar.h>
 #include <regex>
@@ -218,17 +219,17 @@ std::string convertLessThanThousand(int Num) {
   std::string Result;
 
   if (Num >= 100) {
-    Result += Ones.at(Num / 100) + " hundred ";
+    Result += detail::Ones.at(Num / 100) + " hundred ";
     Num %= 100;
   }
 
   if (Num >= 20) {
-    Result += Tens.at(Num / 10);
+    Result += detail::Tens.at(Num / 10);
     if (Num % 10 > 0) {
-      Result += "-" + Ones.at(Num % 10);
+      Result += "-" + detail::Ones.at(Num % 10);
     }
   } else if (Num > 0) {
-    Result += Ones.at(Num);
+    Result += detail::Ones.at(Num);
   }
 
   return Result;
@@ -273,7 +274,7 @@ std::string numberToWords(const std::string &NumberStr) {
       Result += " point";
       std::string DecimalPart = NumberStr.substr(DecimalPos + 1);
       for (char Digit : DecimalPart) {
-        Result += " " + Ones.at(Digit - '0');
+        Result += " " + detail::Ones.at(Digit - '0');
       }
     }
 
@@ -309,7 +310,7 @@ std::vector<llama_token> processTTSPrompt(WasiNNEnvironment &Env,
                                           Graph &GraphRef,
                                           std::string &Prompt) noexcept {
   // Use the custom speaker profile if available.
-  TTSSpeakerProfile SpeakerProfile = TTSDefaultSpeakerProfile;
+  TTSSpeakerProfile SpeakerProfile = detail::TTSDefaultSpeakerProfile;
   if (!GraphRef.TTSSpeakerFilePath.empty()) {
     std::optional<TTSSpeakerProfile> SpeakerProfileOpt =
         getSpeakerProfileFromFile(GraphRef.TTSSpeakerFilePath, Env);
@@ -432,6 +433,8 @@ ErrNo codesToSpeech(WasiNNEnvironment &Env, Graph &GraphRef,
       static_cast<uint32_t>(CxtRef.LlamaOutputTokens.size());
   llama_batch TTSBatch =
       llama_batch_init(NCodes, /* embd */ 0, /* n_seq_max */ 1);
+  cxx20::scope_exit TTSBatchGuard(
+      [&TTSBatch]() noexcept { llama_batch_free(TTSBatch); });
   for (uint32_t I = 0; I < NCodes; ++I) {
     common_batch_add(TTSBatch, CxtRef.LlamaOutputTokens[I], I,
                      /* seq_ids */ {0}, /* logits */ true);
@@ -439,7 +442,6 @@ ErrNo codesToSpeech(WasiNNEnvironment &Env, Graph &GraphRef,
   if (llama_decode(GraphRef.TTSContext.get(), TTSBatch) != 0) {
     RET_ERROR(ErrNo::RuntimeError, "codesToSpeech: fail to eval."sv)
   }
-  llama_batch_free(TTSBatch);
 
   // Get embeddings.
   const int NEmbd = llama_model_n_embd(GraphRef.TTSModel.get());

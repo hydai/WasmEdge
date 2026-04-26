@@ -9,22 +9,6 @@
 
 namespace WasmEdge::Host::WASINN::GGML {
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_GGML
-// Helper to init a llama batch.
-struct llama_batch allocBatch(int64_t NTokens, int64_t Embd,
-                              int32_t NSeqMax) noexcept {
-  struct llama_batch Batch = llama_batch_init(
-      /* n_tokens_alloc */ static_cast<int32_t>(NTokens),
-      /* embd */ static_cast<int32_t>(Embd),
-      /* n_seq_max */ static_cast<int32_t>(NSeqMax));
-  std::fill(Batch.n_seq_id, Batch.n_seq_id + NTokens,
-            static_cast<int32_t>(NSeqMax));
-  for (int64_t I = 0; I < NTokens; I++) {
-    std::fill(Batch.seq_id[I], Batch.seq_id[I] + NSeqMax, 0);
-  }
-  std::fill(Batch.logits, Batch.logits + NTokens, false);
-  return Batch;
-}
-
 // Get base64 image position if found in prompt.
 std::optional<std::tuple<size_t, size_t, size_t>>
 findBase64ImagePayload(std::string_view Prompt, bool IsDebugLog) noexcept {

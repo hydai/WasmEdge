@@ -33,7 +33,7 @@ weightsToMlx(std::string WeightPath) {
     const mx::GGUFLoad Loaded = mx::load_gguf(WeightPath);
     return Loaded.first;
   }
-  spdlog::error("[WASI-NN] MLX backend: Can not regonize model file\n"sv);
+  spdlog::error("[WASI-NN] MLX backend: Cannot recognize model file\n"sv);
   assumingUnreachable();
 }
 

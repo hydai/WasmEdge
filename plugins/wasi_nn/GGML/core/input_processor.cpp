@@ -16,9 +16,14 @@ namespace WasmEdge::Host::WASINN::GGML {
 
 Expect<ErrNo> setInput(WasiNNEnvironment &Env, uint32_t ContextId,
                        uint32_t Index, const TensorData &Tensor) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
-  LOG_DEBUG(GraphRef.EnableDebugLog, "setInput"sv)
+  auto State = Env.getBackendContextGraphOrError<Backend::GGML>(ContextId,
+                                                                "set_input"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
+  LOG_DEBUG(GraphRef.EnableDebugLog, "set_input"sv)
 
   // Use index 1 for metadata.
   if (Index == 1) {
@@ -57,13 +62,12 @@ Expect<ErrNo> setInput(WasiNNEnvironment &Env, uint32_t ContextId,
         GraphRef.LlamaContext.reset();
         if (CxtRef.LlamaSampler) {
           // TODO: Trigger the sampler in other contexts to reallocate.
-          common_sampler_free(CxtRef.LlamaSampler);
-          CxtRef.LlamaSampler = nullptr;
+          CxtRef.LlamaSampler.reset();
         }
         GraphRef.LlamaModel = llama_model_ptr(llama_model_load_from_file(
             GraphRef.Params.model.path.c_str(), ModelParams));
         if (GraphRef.LlamaModel == nullptr) {
-          Env.NNGraph[CxtRef.GraphId].setInvalid();
+          Env.setContextGraphInvalid(ContextId);
           RET_ERROR(ErrNo::InvalidArgument, "setInput: unable to init model."sv)
         }
       }
@@ -80,7 +84,7 @@ Expect<ErrNo> setInput(WasiNNEnvironment &Env, uint32_t ContextId,
           GraphRef.LlamaModel.get(),
           common_context_params_to_llama(GraphRef.Params)));
       if (GraphRef.LlamaContext == nullptr) {
-        Env.NNGraph[CxtRef.GraphId].setInvalid();
+        Env.setContextGraphInvalid(ContextId);
         RET_ERROR(ErrNo::InvalidArgument, "setInput: unable to init context."sv)
       }
     }
@@ -90,32 +94,28 @@ Expect<ErrNo> setInput(WasiNNEnvironment &Env, uint32_t ContextId,
     if (IsSamplerParamsUpdated || CxtRef.LlamaSampler == nullptr) {
       LOG_INFO(GraphRef.EnableLog,
                "setInput: Reallocate llama sampler due to parameters change."sv)
-      if (CxtRef.LlamaSampler) {
-        common_sampler_free(CxtRef.LlamaSampler);
-      }
-      CxtRef.LlamaSampler = common_sampler_init(GraphRef.LlamaModel.get(),
-                                                GraphRef.Params.sampling);
-      if (GraphRef.LlamaContext == nullptr) {
-        Env.NNGraph[CxtRef.GraphId].setInvalid();
+      CxtRef.LlamaSampler.reset(common_sampler_init(GraphRef.LlamaModel.get(),
+                                                    GraphRef.Params.sampling));
+      if (CxtRef.LlamaSampler == nullptr) {
+        Env.setContextGraphInvalid(ContextId);
         RET_ERROR(ErrNo::InvalidArgument, "setInput: unable to init sampler."sv)
       }
     }
 
     // Check that is batch size changed.
     if (CxtRef.CurrentBatchSize != GraphRef.Params.n_batch) {
-      llama_batch_free(CxtRef.LlamaBatch);
-      CxtRef.LlamaBatch = allocBatch(GraphRef.Params.n_batch);
+      CxtRef.LlamaBatch.reset(allocBatch(GraphRef.Params.n_batch));
       CxtRef.CurrentBatchSize = GraphRef.Params.n_batch;
     }
 
-    Env.NNGraph[CxtRef.GraphId].setReady();
+    Env.setContextGraphReady(ContextId);
     LOG_DEBUG(GraphRef.EnableDebugLog,
               "setInput: found Metadata, processing...Done"sv)
     return ErrNo::Success;
   }
 
   // Check the graph is valid after reloading during previous set_input.
-  if (!Env.NNGraph[CxtRef.GraphId].isReady()) {
+  if (!Env.isContextGraphReady(ContextId)) {
     RET_ERROR(
         ErrNo::InvalidArgument,
         "setInput: Graph is invalid. Please reload again by passing metadata "sv

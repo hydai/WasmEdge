@@ -57,8 +57,7 @@ struct Graph {
   BasePrompt Prmopt;
 };
 struct Context {
-  Context(uint32_t Gid, Graph &) noexcept : GraphId(Gid) {}
-  uint32_t GraphId;
+  Context(uint32_t, Graph &) noexcept {}
   std::variant<LLMInput, VLMInput, WhisperInput> Inputs;
   std::variant<LLMOutput, VLMOutput, whisper::TranscribeResult> Outputs;
 };

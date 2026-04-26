@@ -9,6 +9,7 @@
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_TFLITE
 #include "tensorflow/lite/c/c_api.h"
+#include <memory>
 #include <vector>
 #endif
 
@@ -19,26 +20,35 @@ struct WasiNNEnvironment;
 namespace WasmEdge::Host::WASINN::TensorflowLite {
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_TFLITE
-struct Graph {
-  ~Graph() noexcept {
-    if (TFLiteMod) {
-      TfLiteModelDelete(TFLiteMod);
+struct TfLiteModelDeleter {
+  void operator()(TfLiteModel *Ptr) const noexcept {
+    if (Ptr) {
+      TfLiteModelDelete(Ptr);
     }
   }
+};
+
+struct TfLiteInterpreterDeleter {
+  void operator()(TfLiteInterpreter *Ptr) const noexcept {
+    if (Ptr) {
+      TfLiteInterpreterDelete(Ptr);
+    }
+  }
+};
+
+using TfLiteModelPtr = std::unique_ptr<TfLiteModel, TfLiteModelDeleter>;
+using TfLiteInterpreterPtr =
+    std::unique_ptr<TfLiteInterpreter, TfLiteInterpreterDeleter>;
+
+struct Graph {
   std::vector<unsigned char> TfLiteModData;
-  TfLiteModel *TFLiteMod = nullptr;
+  TfLiteModelPtr TFLiteMod = nullptr;
 };
 
 struct Context {
 public:
-  Context(uint32_t GId, Graph &) noexcept : GraphId(GId) {}
-  ~Context() noexcept {
-    if (TFLiteInterp) {
-      TfLiteInterpreterDelete(TFLiteInterp);
-    }
-  }
-  uint32_t GraphId;
-  TfLiteInterpreter *TFLiteInterp = nullptr;
+  Context(uint32_t, Graph &) noexcept {}
+  TfLiteInterpreterPtr TFLiteInterp = nullptr;
 };
 #else
 struct Graph {};

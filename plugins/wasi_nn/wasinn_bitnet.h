@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2019-2024 Second State INC
+
 #pragma once
 
 #include "plugin/plugin.h"
@@ -9,6 +12,8 @@
 #include <llama.h>
 #include <memory>
 #include <sampling.h>
+
+#include "wasinn_llama_batch.h"
 #endif
 
 namespace WasmEdge::Host::WASINN {
@@ -33,17 +38,8 @@ struct LlamaContextDeleter {
     }
   }
 };
-struct CommonSamplerDeleter {
-  void operator()(common_sampler *Ptr) const {
-    if (Ptr) {
-      common_sampler_free(Ptr);
-    }
-  }
-};
-
 using LlamaModelPtr = std::unique_ptr<llama_model, LlamaModelDeleter>;
 using LlamaContextPtr = std::unique_ptr<llama_context, LlamaContextDeleter>;
-using CommonSamplerPtr = std::unique_ptr<common_sampler, CommonSamplerDeleter>;
 
 enum class EmbdNormalizeType : int32_t {
   // From: https://github.com/ggerganov/llama.cpp/blob/master/common/common.h
@@ -72,9 +68,8 @@ struct Graph {
 
 struct Context {
 public:
-  Context(uint32_t GId, Graph &G) noexcept : GraphId(GId), Conf(G.Conf) {}
+  Context(uint32_t, Graph &G) noexcept : Conf(G.Conf) {}
 
-  uint32_t GraphId;
   bool ComputeSingleStarted = false;
 
   int32_t NPos = 0;
@@ -84,8 +79,8 @@ public:
   std::vector<uint8_t> LlamaOutputs;
   CommonSamplerPtr LlamaSampler = nullptr;
   int64_t CurrentBatchSize = 0;
-  struct llama_batch LlamaBatch;
-  struct llama_batch OutputBatch;
+  LlamaBatchHolder LlamaBatch;
+  LlamaBatchHolder OutputBatch;
 
   LocalConfig Conf;
 };

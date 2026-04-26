@@ -4,6 +4,7 @@
 #include "wasinn_piper.h"
 #include "common/errcode.h"
 #include "common/span.h"
+#include "wasinn_output.h"
 #include "wasinnenv.h"
 #include "wasinntypes.h"
 
@@ -236,55 +237,46 @@ void updatePiperOptions(const SynthesisConfig &SynthesisConfig,
 Expect<WASINN::ErrNo> load(WASINN::WasiNNEnvironment &Env,
                            Span<const Span<uint8_t>> Builders, WASINN::Device,
                            uint32_t &GraphId) noexcept {
-  // The graph builder length must be 1.
-  if (Builders.size() != 1) {
-    spdlog::error(
-        "[WASI-NN] Piper backend: Wrong GraphBuilder Length {:d}, expect 1"sv,
-        Builders.size());
-    return WASINN::ErrNo::InvalidArgument;
+  if (auto Res = checkBuilderCount(Builders, 1, Backend::Piper);
+      Res != WASINN::ErrNo::Success) {
+    return Res;
   }
 
   // Add a new graph.
-  uint32_t const GId = Env.newGraph(Backend::Piper);
-  auto &GraphRef = Env.NNGraph[GId].get<Graph>();
-  GraphRef.Config = std::make_unique<RunConfig>();
-  auto String = std::string{Builders[0].begin(), Builders[0].end()};
-  if (auto Res = parseRunConfig(*GraphRef.Config, String);
+  auto Graph = Env.newGraphGuard(Backend::Piper);
+  auto &GraphRef = Graph.get<Backend::Piper>();
+  auto String = asString(Builders[0]);
+  if (auto Res = parseRunConfig(GraphRef.Config, String);
       Res != WASINN::ErrNo::Success) {
-    Env.deleteGraph(GId);
     spdlog::error("[WASI-NN] Piper backend: Failed to parse run config."sv);
     return Res;
   }
 
   std::string EspeakPath = "";
-  if (GraphRef.Config->ESpeakDataPath) {
-    EspeakPath = GraphRef.Config->ESpeakDataPath->string();
+  if (GraphRef.Config.ESpeakDataPath) {
+    EspeakPath = GraphRef.Config.ESpeakDataPath->string();
   }
 
   piper_synthesizer *Synth =
-      piper_create(GraphRef.Config->ModelPath.string().c_str(),
-                   GraphRef.Config->ModelConfigPath.string().c_str(),
+      piper_create(GraphRef.Config.ModelPath.string().c_str(),
+                   GraphRef.Config.ModelConfigPath.string().c_str(),
                    EspeakPath.empty() ? nullptr : EspeakPath.c_str());
 
   if (!Synth) {
     spdlog::error(
         "[WASI-NN] Piper backend: Failed to create piper synthesizer."sv);
-    Env.deleteGraph(GId);
     return WASINN::ErrNo::InvalidArgument;
   }
 
-  GraphRef.Synth = std::unique_ptr<piper_synthesizer, PiperDeleter>(Synth);
-  GraphId = GId;
-  Env.NNGraph[GId].setReady();
+  GraphRef.Synth.reset(Synth);
+  GraphId = Graph.commit();
   return WASINN::ErrNo::Success;
 }
 
 Expect<WASINN::ErrNo> initExecCtx(WASINN::WasiNNEnvironment &Env,
                                   uint32_t GraphId,
                                   uint32_t &ContextId) noexcept {
-  // Create context.
-  ContextId = Env.newContext(GraphId, Env.NNGraph[GraphId]);
-  Env.NNContext[ContextId].setReady();
+  ContextId = Env.newReadyContext(GraphId);
   return WASINN::ErrNo::Success;
 }
 
@@ -301,14 +293,17 @@ Expect<WASINN::ErrNo> setInput(WASINN::WasiNNEnvironment &Env,
     return WASINN::ErrNo::InvalidArgument;
   }
 
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
+  auto State = Env.getBackendContextGraphOrError<Backend::Piper>(ContextId,
+                                                                 "set_input"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
 
-  CxtRef.Line =
-      std::string(reinterpret_cast<const char *>(Tensor.Tensor.data()),
-                  Tensor.Tensor.size());
+  CxtRef.Line = asString(Tensor.Tensor);
 
-  if (GraphRef.Config->JsonInput) {
+  if (GraphRef.Config.JsonInput) {
     simdjson::dom::parser Parser;
     simdjson::dom::element Doc;
     simdjson::padded_string const PaddedInput(CxtRef.Line.value());
@@ -329,8 +324,7 @@ Expect<WASINN::ErrNo> setInput(WASINN::WasiNNEnvironment &Env,
         Err != WASINN::ErrNo::Success) {
       return Err;
     }
-    CxtRef.JsonInputSynthesisConfig =
-        std::make_unique<std::optional<SynthesisConfig>>(NewConfig);
+    CxtRef.JsonInputSynthesisConfig = NewConfig;
   }
   return WASINN::ErrNo::Success;
 }
@@ -344,7 +338,12 @@ Expect<WASINN::ErrNo> getOutput(WASINN::WasiNNEnvironment &Env,
     return WASINN::ErrNo::InvalidArgument;
   }
 
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
+  auto CxtInst =
+      Env.getBackendContextOrError<Backend::Piper>(ContextId, "get_output"sv);
+  if (!CxtInst) {
+    return CxtInst.error();
+  }
+  auto &CxtRef = **CxtInst;
 
   if (!CxtRef.Output) {
     spdlog::error("[WASI-NN] Piper backend: No output available."sv);
@@ -358,22 +357,18 @@ Expect<WASINN::ErrNo> getOutput(WASINN::WasiNNEnvironment &Env,
     return WASINN::ErrNo::InvalidArgument;
   }
 
-  if (CxtRef.Output->size() > OutBuffer.size_bytes()) {
-    spdlog::error(
-        "[WASI-NN] Piper backend: Output size {} is greater than buffer size {}."sv,
-        CxtRef.Output->size(), OutBuffer.size_bytes());
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  std::memcpy(OutBuffer.data(), CxtRef.Output->data(), CxtRef.Output->size());
-  BytesWritten = CxtRef.Output->size();
-  return WASINN::ErrNo::Success;
+  return copyBytesToBuffer(*CxtRef.Output, OutBuffer, BytesWritten);
 }
 
 Expect<WASINN::ErrNo> compute(WASINN::WasiNNEnvironment &Env,
                               uint32_t ContextId) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
+  auto State =
+      Env.getBackendContextGraphOrError<Backend::Piper>(ContextId, "compute"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
 
   if (!CxtRef.Line) {
     spdlog::error("[WASI-NN] Piper backend: Input is not set."sv);
@@ -382,7 +377,7 @@ Expect<WASINN::ErrNo> compute(WASINN::WasiNNEnvironment &Env,
 
   std::string TextToSpeak = CxtRef.Line.value();
 
-  if (GraphRef.Config->JsonInput) {
+  if (GraphRef.Config.JsonInput) {
     simdjson::dom::parser Parser;
     simdjson::dom::element Doc;
     simdjson::padded_string const PaddedInput(TextToSpeak);
@@ -408,25 +403,23 @@ Expect<WASINN::ErrNo> compute(WASINN::WasiNNEnvironment &Env,
 
     SynthesisConfig NewConfig;
     if (parseSynthesisConfig(NewConfig, JsonObj) == WASINN::ErrNo::Success) {
-      CxtRef.JsonInputSynthesisConfig =
-          std::make_unique<std::optional<SynthesisConfig>>(NewConfig);
+      CxtRef.JsonInputSynthesisConfig = NewConfig;
     }
   }
 
   piper_synthesize_options Options =
       piper_default_synthesize_options(GraphRef.Synth.get());
-  updatePiperOptions(GraphRef.Config->DefaultSynthesisConfig, Options);
+  updatePiperOptions(GraphRef.Config.DefaultSynthesisConfig, Options);
 
   auto OutputType = SynthesisConfigOutputType::OUTPUT_WAV;
-  if (GraphRef.Config->DefaultSynthesisConfig.OutputType) {
-    OutputType = GraphRef.Config->DefaultSynthesisConfig.OutputType.value();
+  if (GraphRef.Config.DefaultSynthesisConfig.OutputType) {
+    OutputType = GraphRef.Config.DefaultSynthesisConfig.OutputType.value();
   }
 
-  if (CxtRef.JsonInputSynthesisConfig &&
-      CxtRef.JsonInputSynthesisConfig->has_value()) {
-    updatePiperOptions(CxtRef.JsonInputSynthesisConfig->value(), Options);
-    if (CxtRef.JsonInputSynthesisConfig->value().OutputType) {
-      OutputType = CxtRef.JsonInputSynthesisConfig->value().OutputType.value();
+  if (CxtRef.JsonInputSynthesisConfig) {
+    updatePiperOptions(CxtRef.JsonInputSynthesisConfig.value(), Options);
+    if (CxtRef.JsonInputSynthesisConfig.value().OutputType) {
+      OutputType = CxtRef.JsonInputSynthesisConfig.value().OutputType.value();
     }
   }
 
@@ -470,48 +463,16 @@ Expect<WASINN::ErrNo> compute(WASINN::WasiNNEnvironment &Env,
     writeWavHeader(SampleRate, 1, static_cast<int32_t>(AudioBuffer.size()),
                    *CxtRef.Output);
 
-    const uint8_t *RawData =
-        reinterpret_cast<const uint8_t *>(AudioBuffer.data());
-    CxtRef.Output->insert(CxtRef.Output->end(), RawData,
-                          RawData + (AudioBuffer.size() * sizeof(int16_t)));
+    appendTypedBytes(*CxtRef.Output, AudioBuffer.data(),
+                     AudioBuffer.size() * sizeof(int16_t));
 
   } else {
     size_t const TotalSize = AudioBuffer.size() * sizeof(int16_t);
-    CxtRef.Output->resize(TotalSize);
-    const uint8_t *RawData =
-        reinterpret_cast<const uint8_t *>(AudioBuffer.data());
-    std::copy_n(RawData, TotalSize, CxtRef.Output->data());
+    CxtRef.Output->reserve(TotalSize);
+    appendTypedBytes(*CxtRef.Output, AudioBuffer.data(), TotalSize);
   }
 
   return WASINN::ErrNo::Success;
-}
-#else
-namespace {
-Expect<WASINN::ErrNo> reportBackendNotSupported() noexcept {
-  spdlog::error("[WASI-NN] Piper backend is not supported."sv);
-  return WASINN::ErrNo::InvalidArgument;
-}
-} // namespace
-
-Expect<WASINN::ErrNo> load(WASINN::WasiNNEnvironment &,
-                           Span<const Span<uint8_t>>, WASINN::Device,
-                           uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<WASINN::ErrNo> initExecCtx(WASINN::WasiNNEnvironment &, uint32_t,
-                                  uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<WASINN::ErrNo> setInput(WASINN::WasiNNEnvironment &, uint32_t, uint32_t,
-                               const TensorData &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<WASINN::ErrNo> getOutput(WASINN::WasiNNEnvironment &, uint32_t, uint32_t,
-                                Span<uint8_t>, uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<WASINN::ErrNo> compute(WASINN::WasiNNEnvironment &, uint32_t) noexcept {
-  return reportBackendNotSupported();
 }
 #endif
 } // namespace WasmEdge::Host::WASINN::Piper

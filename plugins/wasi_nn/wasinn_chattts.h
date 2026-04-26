@@ -9,6 +9,8 @@
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_CHATTTS
 #include <Python.h>
+#include <memory>
+#include <utility>
 #endif
 
 namespace WasmEdge::Host::WASINN {
@@ -27,6 +29,17 @@ public:
   GIL(const GIL &) = delete;
   GIL &operator=(const GIL &) = delete;
 };
+
+struct PyObjectDeleter {
+  void operator()(PyObject *Ptr) const noexcept {
+    if (Ptr != nullptr && Py_IsInitialized()) {
+      Py_XDECREF(Ptr);
+    }
+  }
+};
+
+using PyObjectPtr = std::unique_ptr<PyObject, PyObjectDeleter>;
+
 struct Graph {
   bool EnableDebugLog = false;
   Graph() noexcept {
@@ -37,21 +50,42 @@ struct Graph {
       }
     }
   }
+  Graph(const Graph &) = delete;
+  Graph &operator=(const Graph &) = delete;
+  Graph(Graph &&) noexcept = default;
+  Graph &operator=(Graph &&Other) noexcept {
+    if (this != &Other) {
+      release();
+      EnableDebugLog = Other.EnableDebugLog;
+      Chat = std::move(Other.Chat);
+      ChatTTSModule = std::move(Other.ChatTTSModule);
+      ParamsRefineText = std::move(Other.ParamsRefineText);
+      ParamsInferCode = std::move(Other.ParamsInferCode);
+    }
+    return *this;
+  }
   ~Graph() noexcept {
     if (Py_IsInitialized()) {
-      GIL Lock;
-      Py_XDECREF(Chat);
-      Py_XDECREF(ChatTTSModule);
+      release();
     }
   }
-  PyObject *Chat = nullptr;
-  PyObject *ChatTTSModule = nullptr;
-  PyObject *ParamsRefineText = nullptr;
-  PyObject *ParamsInferCode = nullptr;
+  void release() noexcept {
+    if (!Py_IsInitialized()) {
+      return;
+    }
+    GIL Lock;
+    ParamsRefineText.reset();
+    ParamsInferCode.reset();
+    Chat.reset();
+    ChatTTSModule.reset();
+  }
+  PyObjectPtr Chat = nullptr;
+  PyObjectPtr ChatTTSModule = nullptr;
+  PyObjectPtr ParamsRefineText = nullptr;
+  PyObjectPtr ParamsInferCode = nullptr;
 };
 struct Context {
-  Context(uint32_t Gid, Graph &) noexcept : GraphId(Gid) {}
-  uint32_t GraphId;
+  Context(uint32_t, Graph &) noexcept {}
   std::string Inputs;
   std::vector<uint8_t> Outputs;
 };

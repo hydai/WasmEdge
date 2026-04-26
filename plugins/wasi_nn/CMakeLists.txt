@@ -1,28 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2019-2024 Second State INC
 
-wasmedge_add_library(wasmedgePluginWasiNN
-  SHARED
+add_library(wasmedgePluginWasiNNCore
+  OBJECT
+  wasinn_backend.cpp
+  wasinn_dispatch.cpp
+  wasinn_graph.cpp
+  wasinn_memory.cpp
+  wasinn_metadata.cpp
+  wasinn_output.cpp
+  wasinn_rpc_client.cpp
   wasinnenv.cpp
   wasinnfunc.cpp
   wasinnmodule.cpp
-  wasinn_openvino.cpp
-  wasinn_openvino_genai.cpp
-  wasinn_onnx.cpp
-  wasinn_tf.cpp
-  wasinn_torch.cpp
-  wasinn_tfl.cpp
-  GGML/core/ggml_core.cpp
-  wasinn_neuralspeed.cpp
-  wasinn_piper.cpp
-  wasinn_whisper.cpp
-  wasinn_chattts.cpp
-  wasinn_mlx.cpp
-  wasinn_bitnet.cpp
 )
+wasmedge_setup_target(wasmedgePluginWasiNNCore)
 
 include(WASINNDeps)
-wasmedge_setup_wasinn_target(wasmedgePluginWasiNN PLUGINLIB)
+include(${CMAKE_CURRENT_LIST_DIR}/wasi_nn_backends.cmake)
+wasmedge_setup_wasinn_target(wasmedgePluginWasiNNCore PLUGINLIB)
+
+wasmedge_add_library(wasmedgePluginWasiNN
+  SHARED
+  $<TARGET_OBJECTS:wasmedgePluginWasiNNCore>
+)
 
 set(WASMEDGE_WASI_NN_VERSION "0.1.34" CACHE STRING "WasmEdge WASI-NN library version")
 set(WASMEDGE_WASI_NN_SOVERSION "0" CACHE STRING "WasmEdge WASI-NN library soversion")
@@ -33,57 +34,23 @@ list(GET WASI_NN_VERSION_LIST 0 WASI_NN_VERSION_MAJOR)
 list(GET WASI_NN_VERSION_LIST 1 WASI_NN_VERSION_MINOR)
 list(GET WASI_NN_VERSION_LIST 2 WASI_NN_VERSION_PATCH)
 
-target_compile_definitions(wasmedgePluginWasiNN PRIVATE
-    WASI_NN_VERSION_MAJOR=${WASI_NN_VERSION_MAJOR}
-    WASI_NN_VERSION_MINOR=${WASI_NN_VERSION_MINOR}
-    WASI_NN_VERSION_PATCH=${WASI_NN_VERSION_PATCH}
+target_compile_definitions(wasmedgePluginWasiNNCore PRIVATE
+  WASI_NN_VERSION_MAJOR=${WASI_NN_VERSION_MAJOR}
+  WASI_NN_VERSION_MINOR=${WASI_NN_VERSION_MINOR}
+  WASI_NN_VERSION_PATCH=${WASI_NN_VERSION_PATCH}
 )
-# This for-each iteration is for the additional sources.
-# The dependencies are moved into `cmake/WASINNDeps.cmake`.
-foreach(BACKEND ${WASMEDGE_PLUGIN_WASI_NN_BACKEND})
-  string(TOLOWER ${BACKEND} BACKEND)
-  if(BACKEND STREQUAL "mlx")
-    target_sources(wasmedgePluginWasiNN
-      PRIVATE
-      MLX/prompt/prompt.cpp
-      MLX/model/llm/transformer.cpp
-      MLX/model/llm/registry.cpp
-      MLX/model/gemma3/language.cpp
-      MLX/model/gemma3/vision.cpp
-      MLX/model/gemma3/gemma3.cpp
-      MLX/model/converter.cpp
-      MLX/model/utils.cpp
-      MLX/model/vlm_base.cpp
-      MLX/model/vlm_sampling.cpp
-      MLX/model/whisper/whisper.cpp
-      MLX/model/whisper/tokenizer.cpp
-      MLX/model/whisper/decoding.cpp
-      MLX/model/whisper_transcribe.cpp
-      MLX/mlx/base.cpp
-      MLX/mlx/linear.cpp
-      MLX/mlx/convolution.cpp
-      MLX/mlx/positional_encoding.cpp
-      MLX/mlx/activations.cpp
-      MLX/mlx/embedding.cpp
-      MLX/mlx/normalization.cpp
-      MLX/mlx/transformer.cpp
-      MLX/mlx/pooling.cpp
-      MLX/mlx/quantized.cpp
-    )
-  endif()
 
+if(WASMEDGE_BUILD_TESTS)
+  target_compile_definitions(wasmedgePluginWasiNNCore
+    PUBLIC
+    WASMEDGE_WASI_NN_TESTING
+  )
+endif()
+
+foreach(BACKEND ${WASMEDGE_PLUGIN_WASI_NN_BACKEND})
+  wasmedge_wasi_nn_normalize_backend(BACKEND "${BACKEND}")
+  wasmedge_wasi_nn_add_backend_sources(wasmedgePluginWasiNNCore "${BACKEND}" PLUGIN)
   if(BACKEND STREQUAL "ggml")
-    target_sources(wasmedgePluginWasiNN
-      PRIVATE
-      GGML/core/ggml_core.cpp
-      GGML/core/input_processor.cpp
-      GGML/core/output_generator.cpp
-      GGML/metadata/metadata_parser.cpp
-      GGML/compute/compute_engine.cpp
-      GGML/compute/inference_manager.cpp
-      GGML/tts/tts_core.cpp
-      GGML/utils.cpp
-    )
     if(WASMEDGE_PLUGIN_WASI_NN_GGML_LLAMA_HIP)
       find_package(hip REQUIRED)
       find_package(hipblas REQUIRED)
@@ -94,11 +61,10 @@ foreach(BACKEND ${WASMEDGE_PLUGIN_WASI_NN_BACKEND})
         set(GPU_TARGETS "gfx90c" CACHE STRING "Default for Vega iGPU")
       endif()
       message(STATUS "Enabling HIP for ggml backend with targets: ${GPU_TARGETS}")
-      target_compile_definitions(wasmedgePluginWasiNN PRIVATE GGML_HIP=${GGML_HIP} GPU_TARGETS=${GPU_TARGETS})
+      target_compile_definitions(wasmedgePluginWasiNNCore PRIVATE GGML_HIP=${GGML_HIP} GPU_TARGETS=${GPU_TARGETS})
       target_link_libraries(wasmedgePluginWasiNN PRIVATE hip::host roc::hipblas)
     endif()
-  endif()
-  if(BACKEND STREQUAL "piper")
+  elseif(BACKEND STREQUAL "piper")
     if(DEFINED PIPER_ROOT)
       find_library(ESPEAK_NG_LIB
           NAMES espeak-ng libespeak-ng
@@ -131,20 +97,31 @@ foreach(BACKEND ${WASMEDGE_PLUGIN_WASI_NN_BACKEND})
   endif()
 endforeach()
 
-target_compile_options(wasmedgePluginWasiNN
+target_compile_definitions(wasmedgePluginWasiNNCore
   PUBLIC
-  -DWASMEDGE_PLUGIN
+  WASMEDGE_PLUGIN
+)
+
+target_include_directories(wasmedgePluginWasiNNCore
+  PUBLIC
+  $<TARGET_PROPERTY:wasmedgePlugin,INCLUDE_DIRECTORIES>
+  $<TARGET_PROPERTY:wasmedgeHostModuleWasi,INCLUDE_DIRECTORIES>
+  ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_include_directories(wasmedgePluginWasiNN
   PUBLIC
-  $<TARGET_PROPERTY:wasmedgePlugin,INCLUDE_DIRECTORIES>
-  ${CMAKE_CURRENT_SOURCE_DIR}
+  $<TARGET_PROPERTY:wasmedgePluginWasiNNCore,INCLUDE_DIRECTORIES>
 )
 
+wasmedge_link_wasinn_backend_dependencies(wasmedgePluginWasiNN wasmedgePluginWasiNNCore)
+
 if(WASMEDGE_BUILD_WASI_NN_RPC)
-  add_definitions(-DWASMEDGE_BUILD_WASI_NN_RPC)
-  target_include_directories(wasmedgePluginWasiNN
+  target_compile_definitions(wasmedgePluginWasiNNCore
+    PUBLIC
+    WASMEDGE_BUILD_WASI_NN_RPC
+  )
+  target_include_directories(wasmedgePluginWasiNNCore
     SYSTEM BEFORE PUBLIC ${Protobuf_INCLUDE_DIR}
   )
   target_link_libraries(wasmedgePluginWasiNN

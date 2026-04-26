@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: 2019-2024 Second State INC
 
 #include "wasinn_torch.h"
+#include "wasinn_output.h"
 #include "wasinnenv.h"
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_TORCH
+#include <limits>
 #include <torch/torch.h>
 #endif
 
@@ -108,8 +110,8 @@ Expect<ErrNo> AOTInductor::setDevice(Device Device) {
 
 Expect<ErrNo> AOTInductor::loadFromBinary(std::istream &, Device) {
   spdlog::error(
-      "[WASI-NN] Torch: AOTInductor can not load by binary data. Please "
-      "pass the share library name (*.so) in nn-preload"sv);
+      "[WASI-NN] Torch: AOTInductor cannot load by binary data. Please "
+      "pass the shared library name (*.so) in nn-preload"sv);
   return ErrNo::InvalidArgument;
 }
 
@@ -119,18 +121,20 @@ Expect<ErrNo> AOTInductor::loadFromPath(const std::string &Path,
     return Err;
   }
   if (TorchDevice == at::kCPU) {
-    TorchModel = new torch::inductor::AOTIModelContainerRunnerCpu(Path.c_str());
+    TorchModel = std::make_unique<torch::inductor::AOTIModelContainerRunnerCpu>(
+        Path.c_str());
   } else if (TorchDevice == at::kCUDA) {
 #ifdef TORCHAOTI_USE_CUDA
     TorchModel =
-        new torch::inductor::AOTIModelContainerRunnerCuda(Path.c_str());
+        std::make_unique<torch::inductor::AOTIModelContainerRunnerCuda>(
+            Path.c_str());
 #else
     spdlog::error("[WASI-NN] Torch: Please rebuild the plugin with AOTInductor "
                   "CUDA support."sv);
     return ErrNo::InvalidArgument;
 #endif
   } else {
-    spdlog::error("[WASI-NN] Torch: Can not load the AOTInductor."sv);
+    spdlog::error("[WASI-NN] Torch: Cannot load the AOTInductor."sv);
     return ErrNo::InvalidArgument;
   }
   return ErrNo::Success;
@@ -147,7 +151,7 @@ Expect<ErrNo> AOTInductor::run(std::vector<at::Tensor> In,
 }
 
 PyModelBackend guessPyModelBackendType(const std::string_view &Model) {
-  // TODO: Add more model type detection when we supporet more OS.
+  // TODO: Add more model type detection when we support more OS.
   // ex .dll, .dylib, etc.
   if (Model.substr(0, 8) == "preload:"sv) {
     if (Model.substr(Model.size() - 3, 3) == ".so"sv) {
@@ -168,29 +172,26 @@ PyModelBackend guessPyModelBackendType(const std::string_view &Model) {
 
 Expect<ErrNo> load(WasiNNEnvironment &Env, Span<const Span<uint8_t>> Builders,
                    Device Device, uint32_t &GraphId) noexcept {
-  // The graph builder length must be 1.
-  if (Builders.size() != 1) {
-    spdlog::error("[WASI-NN] Torch: Wrong GraphBuilder Length {:d}, expect 1"sv,
-                  Builders.size());
-    return ErrNo::InvalidArgument;
+  if (auto Res = checkBuilderCount(Builders, 1, Backend::PyTorch);
+      Res != ErrNo::Success) {
+    return Res;
   }
 
   auto Weight = Builders[0];
   // Add a new graph.
-  uint32_t GId = Env.newGraph(Backend::PyTorch);
-  auto &GraphRef = Env.NNGraph[GId].get<Graph>();
+  auto Graph = Env.newGraphGuard(Backend::PyTorch);
+  auto &GraphRef = Graph.get<Backend::PyTorch>();
 
   // Load the model from the binary data.
   // Note: Pytorch use try catch to handle the error.
   try {
-    const std::string_view BinModel(reinterpret_cast<char *>(Weight.data()),
-                                    Weight.size());
+    const std::string_view BinModel = asStringView(Weight);
     PyModelBackend ModelType = guessPyModelBackendType(BinModel);
 
     if (ModelType == PyModelBackend::TorchScript) {
-      GraphRef.Model = new TorchScript();
+      GraphRef.Model = std::make_unique<TorchScript>();
     } else if (ModelType == PyModelBackend::AOTInductor) {
-      GraphRef.Model = new AOTInductor();
+      GraphRef.Model = std::make_unique<AOTInductor>();
     } else {
       spdlog::error("[WASI-NN] Torch: Unknown model type."sv);
       return ErrNo::InvalidArgument;
@@ -198,33 +199,42 @@ Expect<ErrNo> load(WasiNNEnvironment &Env, Span<const Span<uint8_t>> Builders,
 
     if (BinModel.substr(0, 8) == "preload:"sv) {
       const std::string ModelFilePath(BinModel.substr(8));
-      GraphRef.Model->loadFromPath(ModelFilePath, Device);
+      if (auto Res = GraphRef.Model->loadFromPath(ModelFilePath, Device);
+          Res != ErrNo::Success) {
+        return Res;
+      }
     } else {
       std::istringstream BinRead{std::string(BinModel)};
       // std::istringstream BinRead(BinModel); // Need C++26...
-      GraphRef.Model->loadFromBinary(BinRead, Device);
+      if (auto Res = GraphRef.Model->loadFromBinary(BinRead, Device);
+          Res != ErrNo::Success) {
+        return Res;
+      }
     }
   } catch (const c10::Error &e) {
     spdlog::error("[WASI-NN] Torch: Failed when load the TorchScript model."sv);
-    Env.NNGraph.pop_back();
     return ErrNo::InvalidArgument;
   }
 
-  GraphId = GId;
-  Env.NNGraph[GId].setReady();
+  GraphId = Graph.commit();
   return ErrNo::Success;
 }
 
 Expect<ErrNo> initExecCtx(WasiNNEnvironment &Env, uint32_t GraphId,
                           uint32_t &ContextId) noexcept {
-  ContextId = Env.newContext(GraphId, Env.NNGraph[GraphId]);
-  Env.NNContext[ContextId].setReady();
+  ContextId = Env.newReadyContext(GraphId);
   return ErrNo::Success;
 }
 
 Expect<ErrNo> setInput(WasiNNEnvironment &Env, uint32_t ContextId,
                        uint32_t Index, const TensorData &Tensor) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
+  auto State = Env.getBackendContextGraphOrError<Backend::PyTorch>(
+      ContextId, "set_input"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
   if (Index >= CxtRef.TorchInputs.size()) {
     CxtRef.TorchInputs.resize(Index + 1);
   }
@@ -239,7 +249,6 @@ Expect<ErrNo> setInput(WasiNNEnvironment &Env, uint32_t ContextId,
   for (size_t I = 0; I < Tensor.Dimension.size(); I++) {
     Dims.push_back(static_cast<int64_t>(Tensor.Dimension[I]));
   }
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
   torch::Tensor InTensor =
       torch::from_blob(reinterpret_cast<float *>(Tensor.Tensor.data()), Dims,
                        Options)
@@ -252,7 +261,12 @@ Expect<ErrNo> setInput(WasiNNEnvironment &Env, uint32_t ContextId,
 Expect<ErrNo> getOutput(WasiNNEnvironment &Env, uint32_t ContextId,
                         uint32_t Index, Span<uint8_t> OutBuffer,
                         uint32_t &BytesWritten) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
+  auto CxtInst =
+      Env.getBackendContextOrError<Backend::PyTorch>(ContextId, "get_output"sv);
+  if (!CxtInst) {
+    return CxtInst.error();
+  }
+  auto &CxtRef = **CxtInst;
   if (CxtRef.TorchOutputs.size() <= Index) {
     spdlog::error(
         "[WASI-NN] Torch: The output index {} exceeds the outputs number {}."sv,
@@ -265,18 +279,34 @@ Expect<ErrNo> getOutput(WasiNNEnvironment &Env, uint32_t ContextId,
 
   size_t BlobSize = 1;
   for (auto I : OutTensor.sizes()) {
-    BlobSize *= I;
+    const auto Dimension = static_cast<size_t>(I);
+    if (Dimension != 0 &&
+        BlobSize > std::numeric_limits<size_t>::max() / Dimension) {
+      spdlog::error("[WASI-NN] Torch: Output tensor size is too large."sv);
+      return ErrNo::InvalidArgument;
+    }
+    BlobSize *= Dimension;
   }
-  uint32_t BytesToWrite =
-      std::min(static_cast<size_t>(BlobSize * 4), OutBuffer.size());
-  std::copy_n(reinterpret_cast<const uint8_t *>(TensorBuffer), BytesToWrite,
-              OutBuffer.data());
-  BytesWritten = BytesToWrite;
-  return ErrNo::Success;
+  if (BlobSize > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) /
+                     sizeof(float)) {
+    spdlog::error("[WASI-NN] Torch: Output tensor size is too large."sv);
+    return ErrNo::InvalidArgument;
+  }
+
+  const size_t TensorByteSize = BlobSize * sizeof(float);
+  return copyBytesToBuffer(
+      {reinterpret_cast<const uint8_t *>(TensorBuffer), TensorByteSize},
+      OutBuffer, BytesWritten);
 }
 
 Expect<ErrNo> compute(WasiNNEnvironment &Env, uint32_t ContextId) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
+  auto State = Env.getBackendContextGraphOrError<Backend::PyTorch>(ContextId,
+                                                                   "compute"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
   if (CxtRef.TorchInputs.size() == 0) {
     spdlog::error("[WASI-NN] Torch: Input is not set!"sv);
     return ErrNo::InvalidArgument;
@@ -288,48 +318,18 @@ Expect<ErrNo> compute(WasiNNEnvironment &Env, uint32_t ContextId) noexcept {
       return ErrNo::InvalidArgument;
     }
   }
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
   return GraphRef.Model->run(CxtRef.TorchInputs, CxtRef.TorchOutputs);
 }
 
 Expect<ErrNo> unload(WasiNNEnvironment &Env, uint32_t GraphId) noexcept {
-  auto &GraphRef = Env.NNGraph[GraphId].get<Graph>();
-  if (GraphRef.Model) {
-    delete GraphRef.Model;
+  auto GraphInst =
+      Env.getBackendGraphOrError<Backend::PyTorch>(GraphId, "unload"sv);
+  if (!GraphInst) {
+    return GraphInst.error();
   }
+  auto &GraphRef = **GraphInst;
+  GraphRef.Model.reset();
   return ErrNo::Success;
 }
-
-#else
-namespace {
-Expect<ErrNo> reportBackendNotSupported() noexcept {
-  spdlog::error("[WASI-NN] PyTorch backend is not built. use "
-                "-WASMEDGE_PLUGIN_WASI_NN_BACKEND=\"PyTorch\" to build it.");
-  return ErrNo::InvalidArgument;
-}
-} // namespace
-
-Expect<ErrNo> load(WasiNNEnvironment &, Span<const Span<uint8_t>>, Device,
-                   uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<ErrNo> initExecCtx(WasiNNEnvironment &, uint32_t, uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<ErrNo> setInput(WasiNNEnvironment &, uint32_t, uint32_t,
-                       const TensorData &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<ErrNo> getOutput(WasiNNEnvironment &, uint32_t, uint32_t, Span<uint8_t>,
-                        uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<ErrNo> compute(WasiNNEnvironment &, uint32_t) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<ErrNo> unload(WasiNNEnvironment &, uint32_t) noexcept {
-  return reportBackendNotSupported();
-}
-
 #endif
 } // namespace WasmEdge::Host::WASINN::PyTorch
