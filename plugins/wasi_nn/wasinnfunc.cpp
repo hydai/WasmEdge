@@ -2,390 +2,240 @@
 // SPDX-FileCopyrightText: 2019-2024 Second State INC
 
 #include "wasinnfunc.h"
+#include "wasinn_dispatch.h"
+#include "wasinn_memory.h"
+#include "wasinn_rpc_client.h"
 #include "wasinnenv.h"
 
-#include "common/spdlog.h"
-
 #include <string>
-#include <string_view>
-
-#ifdef WASMEDGE_BUILD_WASI_NN_RPC
-#include "wasi_ephemeral_nn.grpc.pb.h"
-
-#include <grpc/grpc.h>
-#endif // #ifdef WASMEDGE_BUILD_WASI_NN_RPC
+#include <utility>
+#include <vector>
 
 namespace WasmEdge {
 namespace Host {
 
 namespace {
-inline void reportUnknownBackend(WASINN::Backend B) noexcept {
-  spdlog::error("[WASI-NN] Unknown backend {}."sv, static_cast<uint32_t>(B));
-}
-Expect<WASINN::ErrNo> load(WASINN::WasiNNEnvironment &Env,
-                           Span<const Span<uint8_t>> Builders,
-                           WASINN::Backend Backend, WASINN::Device Device,
-                           uint32_t &GraphId) {
-  switch (Backend) {
-#define EACH(B)                                                                \
-  case WASINN::Backend::B:                                                     \
-    return WASINN::B::load(Env, Builders, Device, GraphId);
-    FOR_EACH_BACKEND(EACH)
-#undef EACH
-  default:
-    reportUnknownBackend(Backend);
-    return WASINN::ErrNo::InvalidEncoding;
+using namespace std::literals;
+
+struct NamedLoadMemory {
+  uint32_t GraphIdPtr;
+  Span<const uint8_t> Name;
+};
+
+Expected<NamedLoadMemory, WASINN::ErrNo>
+getNamedLoadMemory(Runtime::Instance::MemoryInstance &MemInst, uint32_t NamePtr,
+                   uint32_t NameLen, uint32_t GraphIdPtr) noexcept {
+  if (unlikely(getGraphIdPointer(MemInst, GraphIdPtr) == nullptr)) {
+    return Unexpected<WASINN::ErrNo>(WASINN::ErrNo::InvalidArgument);
   }
-}
-#ifdef WASMEDGE_BUILD_WASI_NN_RPC
-WASINN::ErrNo metadataToErrNo(
-    const std::multimap<grpc::string_ref, grpc::string_ref> &Metadata) {
-  if (Metadata.find("errno") != Metadata.end()) {
-    auto ErrNo = std::stoi(Metadata.find("errno")->second.data());
-    return static_cast<WASINN::ErrNo>(ErrNo);
+
+  auto Name = getModelData(MemInst, NamePtr, NameLen, "Name"sv);
+  if (!Name) {
+    return Unexpected<WASINN::ErrNo>(WASINN::ErrNo::InvalidArgument);
   }
-  return WASINN::ErrNo::Success;
+  return NamedLoadMemory{GraphIdPtr, *Name};
 }
-#endif // #ifdef WASMEDGE_BUILD_WASI_NN_RPC
+
+template <typename CallT>
+Expect<WASINN::ErrNo>
+runOutputAndWriteSize(Runtime::Instance::MemoryInstance &MemInst,
+                      const OutputBufferView &Output, CallT &&Call) {
+  uint32_t NativeBytesWritten = 0;
+  auto Res = std::forward<CallT>(Call)(Output.Buffer, NativeBytesWritten);
+  if (!Res || Res.value() != WASINN::ErrNo::Success) {
+    return Res;
+  }
+  if (auto Write = writeUInt32Result(MemInst, Output.BytesWrittenPtr,
+                                     NativeBytesWritten, "BytesWritten"sv);
+      !Write) {
+    return WASINN::ErrNo::InvalidArgument;
+  }
+  return Res;
+}
 } // namespace
 
 Expect<WASINN::ErrNo>
 WasiNNLoad::bodyImpl(const Runtime::CallingFrame &Frame, uint32_t BuilderPtr,
                      uint32_t BuilderLen, uint32_t RawEncoding, uint32_t Target,
                      uint32_t GraphIdPtr) {
-  Env.setEnviron(&Frame);
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    // TODO: implement RPC for Load
-    spdlog::error("[WASI-NN] RPC client is not implemented for Load"sv);
-    return WASINN::ErrNo::UnsupportedOperation;
+  if (Env.hasRPCChannel()) {
+    return WASINN::RPC::load();
   }
 #endif
   // Check memory instance from module.
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
+  EXPECTED_TRY(auto *MemInst, getMemoryInstance(Frame));
   // Check the return value: GraphIdPtr should be valid.
-  uint32_t *GraphId = MemInst->getPointer<uint32_t *>(GraphIdPtr);
-  if (unlikely(GraphId == nullptr)) {
-    spdlog::error(
-        "[WASI-NN] Failed when accessing the return GraphID memory."sv);
+  if (unlikely(getGraphIdPointer(*MemInst, GraphIdPtr) == nullptr)) {
     return WASINN::ErrNo::InvalidArgument;
   }
-  // Get and check the device.
-  const auto Device = static_cast<WASINN::Device>(Target);
-  switch (Device) {
-  case WASINN::Device::CPU:
-  case WASINN::Device::GPU:
-  case WASINN::Device::TPU:
-    break;
-  default:
-    spdlog::error("[WASI-NN] Unknown device {}."sv, Target);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-  spdlog::debug("[WASI-NN] Using device: {}."sv, Device);
-
-  // Builders' Layout:
-  //   | builder-0 | builder-0 len | builder-1 | builder-1 len | ...
-  struct WasiBuilderPair {
-    uint32_t Ptr;
-    uint32_t Len;
-  };
-
-  const auto WasiBuilders =
-      MemInst->getSpan<const WasiBuilderPair>(BuilderPtr, BuilderLen);
-  if (unlikely(WasiBuilders.size() != BuilderLen)) {
-    spdlog::error("[WASI-NN] Failed when accessing the GraphBuilder memory."sv);
+  auto Device = getDevice(Target);
+  if (!Device) {
     return WASINN::ErrNo::InvalidArgument;
   }
 
-  std::vector<Span<uint8_t>> Builders;
-  Builders.reserve(BuilderLen);
-  for (size_t I = 0; I < WasiBuilders.size(); ++I) {
-    const auto &WasiBuilder = WasiBuilders[I];
-    auto Builder = MemInst->getSpan<uint8_t>(EndianValue(WasiBuilder.Ptr).le(),
-                                             EndianValue(WasiBuilder.Len).le());
-    if (unlikely(Builder.size() != EndianValue(WasiBuilder.Len).le())) {
-      spdlog::error("[WASI-NN] Failed when accessing the Builder[{}] memory."sv,
-                    I);
-      return WASINN::ErrNo::InvalidArgument;
-    }
-    Builders.emplace_back(Builder);
+  auto Builders = getGraphBuilders(*MemInst, BuilderPtr, BuilderLen);
+  if (!Builders) {
+    return WASINN::ErrNo::InvalidArgument;
   }
+
   auto Backend = static_cast<WASINN::Backend>(RawEncoding);
-  return load(Env, Builders, Backend, Device, *GraphId);
+  uint32_t NativeGraphId = 0;
+  auto Res =
+      WASINN::Dispatch::load(Env, *Builders, Backend, *Device, NativeGraphId);
+  if (!Res || Res.value() != WASINN::ErrNo::Success) {
+    return Res;
+  }
+  if (auto Write =
+          writeUInt32Result(*MemInst, GraphIdPtr, NativeGraphId, "GraphID"sv);
+      !Write) {
+    return WASINN::ErrNo::InvalidArgument;
+  }
+  return Res;
 }
 
 Expect<WASINN::ErrNo>
 WasiNNLoadByName::bodyImpl(const Runtime::CallingFrame &Frame, uint32_t NamePtr,
                            uint32_t NameLen, uint32_t GraphIdPtr) {
-  Env.setEnviron(&Frame);
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
-  // Check the return value: GraphIdPtr should be valid.
-  uint32_t *GraphId = MemInst->getPointer<uint32_t *>(GraphIdPtr);
-  if (unlikely(GraphId == nullptr)) {
-    spdlog::error(
-        "[WASI-NN] Failed when accessing the return GraphID memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  // Get the name of model
-  auto Name = MemInst->getPointer<const uint32_t *>(NamePtr);
-  if (unlikely(Name == nullptr)) {
-    spdlog::error("[WASI-NN] Failed when accessing the return Name memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
+  EXPECTED_TRY(auto *MemInst, getMemoryInstance(Frame));
+  auto Input = getNamedLoadMemory(*MemInst, NamePtr, NameLen, GraphIdPtr);
+  if (!Input) {
+    return Input.error();
   }
 
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::Graph::NewStub(Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::LoadByNameRequest Req;
-    auto NameStrView = MemInst->getStringView(NamePtr, NameLen);
-    Req.set_name(NameStrView.data(), NameStrView.size());
-    wasi_ephemeral_nn::LoadByNameResult Res;
-    auto Status = Stub->LoadByName(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
+  if (Env.hasRPCChannel()) {
+    uint32_t NativeGraphId = 0;
+    auto Res = WASINN::RPC::loadByName(Env, Input->Name, NativeGraphId);
+    if (!Res || Res.value() != WASINN::ErrNo::Success) {
+      return Res;
     }
-    *GraphId = Res.graph_handle();
-    return WASINN::ErrNo::Success;
+    if (auto Write = writeUInt32Result(*MemInst, Input->GraphIdPtr,
+                                       NativeGraphId, "GraphID"sv);
+        !Write) {
+      return WASINN::ErrNo::InvalidArgument;
+    }
+    return Res;
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
 
-  // Get the model
-  std::string ModelName(reinterpret_cast<const char *>(Name), NameLen);
-  if (Env.mdGet(ModelName, *GraphId)) {
-    return WASINN::ErrNo::Success;
-  } else {
-    return Env.mdBuild(ModelName, *GraphId, load);
+  uint32_t NativeGraphId = 0;
+  auto Res =
+      WASINN::Dispatch::loadPreloadedModel(Env, Input->Name, NativeGraphId);
+  if (!Res || Res.value() != WASINN::ErrNo::Success) {
+    return Res;
   }
+  if (auto Write = writeUInt32Result(*MemInst, Input->GraphIdPtr, NativeGraphId,
+                                     "GraphID"sv);
+      !Write) {
+    return WASINN::ErrNo::InvalidArgument;
+  }
+  return Res;
 }
 
 Expect<WASINN::ErrNo> WasiNNLoadByNameWithConfig::bodyImpl(
     const Runtime::CallingFrame &Frame, uint32_t NamePtr, uint32_t NameLen,
     uint32_t ConfigPtr, uint32_t ConfigLen, uint32_t GraphIdPtr) {
-  Env.setEnviron(&Frame);
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
-  // Check the return value: GraphIdPtr should be valid.
-  auto GraphId = MemInst->getPointer<uint32_t *>(GraphIdPtr);
-  if (unlikely(GraphId == nullptr)) {
-    spdlog::error(
-        "[WASI-NN] Failed when accessing the return GraphID memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  // Get the name of model
-  auto Name = MemInst->getPointer<const uint32_t *>(NamePtr);
-  if (unlikely(Name == nullptr)) {
-    spdlog::error("[WASI-NN] Failed when accessing the return Name memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
+  EXPECTED_TRY(auto *MemInst, getMemoryInstance(Frame));
+  auto Input = getNamedLoadMemory(*MemInst, NamePtr, NameLen, GraphIdPtr);
+  if (!Input) {
+    return Input.error();
   }
 
   // Get the config of model
-  auto Config = MemInst->getPointer<const uint32_t *>(ConfigPtr);
-  if (unlikely(Config == nullptr)) {
-    spdlog::error(
-        "[WASI-NN] Failed when accessing the return Config memory."sv);
+  auto Config = getModelData(*MemInst, ConfigPtr, ConfigLen, "Config"sv);
+  if (!Config) {
     return WASINN::ErrNo::InvalidArgument;
   }
 
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::Graph::NewStub(Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::LoadByNameWithConfigRequest Req;
-    auto NameStrView = MemInst->getStringView(NamePtr, NameLen);
-    auto ConfigStrView = MemInst->getStringView(ConfigPtr, ConfigLen);
-    Req.set_name(NameStrView.data(), NameStrView.size());
-    Req.set_config(ConfigStrView.data(), ConfigStrView.size());
-    wasi_ephemeral_nn::LoadByNameWithConfigResult Res;
-    auto Status = Stub->LoadByNameWithConfig(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
+  if (Env.hasRPCChannel()) {
+    uint32_t NativeGraphId = 0;
+    auto Res = WASINN::RPC::loadByNameWithConfig(Env, Input->Name, *Config,
+                                                 NativeGraphId);
+    if (!Res || Res.value() != WASINN::ErrNo::Success) {
+      return Res;
     }
-    *GraphId = Res.graph_handle();
-    return WASINN::ErrNo::Success;
+    if (auto Write = writeUInt32Result(*MemInst, Input->GraphIdPtr,
+                                       NativeGraphId, "GraphID"sv);
+        !Write) {
+      return WASINN::ErrNo::InvalidArgument;
+    }
+    return Res;
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
 
-  // Get the model
-  std::string ModelName(reinterpret_cast<const char *>(Name), NameLen);
-  std::vector<uint8_t> ModelConfig(reinterpret_cast<const uint8_t *>(Config),
-                                   reinterpret_cast<const uint8_t *>(Config) +
-                                       ConfigLen);
-  if (Env.mdGet(ModelName, *GraphId)) {
-    return WASINN::ErrNo::Success;
-  } else {
-    return Env.mdBuild(ModelName, *GraphId, load, ModelConfig);
+  std::vector<uint8_t> ModelConfig(Config->begin(), Config->end());
+  uint32_t NativeGraphId = 0;
+  auto Res = WASINN::Dispatch::loadPreloadedModel(
+      Env, Input->Name, NativeGraphId, std::move(ModelConfig));
+  if (!Res || Res.value() != WASINN::ErrNo::Success) {
+    return Res;
   }
+  if (auto Write = writeUInt32Result(*MemInst, Input->GraphIdPtr, NativeGraphId,
+                                     "GraphID"sv);
+      !Write) {
+    return WASINN::ErrNo::InvalidArgument;
+  }
+  return Res;
 }
 
 Expect<WASINN::ErrNo>
 WasiNNInitExecCtx::bodyImpl(const Runtime::CallingFrame &Frame,
                             uint32_t GraphId, uint32_t ContextPtr) {
-  Env.setEnviron(&Frame);
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
+  EXPECTED_TRY(auto *MemInst, getMemoryInstance(Frame));
 
   // Check the return value: Context should be valid.
-  uint32_t *Context = MemInst->getPointer<uint32_t *>(ContextPtr);
-  if (unlikely(Context == nullptr)) {
-    spdlog::error("[WASI-NN] Failed when accessing the Context memory."sv);
+  if (unlikely(getContextPointer(*MemInst, ContextPtr) == nullptr)) {
     return WASINN::ErrNo::InvalidArgument;
   }
 
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::GraphResource::NewStub(Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::InitExecutionContextRequest Req;
-    Req.set_resource_handle(GraphId);
-    wasi_ephemeral_nn::InitExecutionContextResult Res;
-    auto Status = Stub->InitExecutionContext(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
+  if (Env.hasRPCChannel()) {
+    uint32_t NativeContextId = 0;
+    auto Res = WASINN::RPC::initExecCtx(Env, GraphId, NativeContextId);
+    if (!Res || Res.value() != WASINN::ErrNo::Success) {
+      return Res;
     }
-    *Context = Res.ctx_handle();
-    return WASINN::ErrNo::Success;
+    if (auto Write = writeUInt32Result(*MemInst, ContextPtr, NativeContextId,
+                                       "Context"sv);
+        !Write) {
+      return WASINN::ErrNo::InvalidArgument;
+    }
+    return Res;
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
 
-  if (Env.NNGraph.size() <= GraphId || Env.NNGraph[GraphId].isFinalized()) {
-    spdlog::error("[WASI-NN] init_execution_context: Graph ID {} does not "
-                  "exist or is unloaded."sv,
-                  GraphId);
+  uint32_t NativeContextId = 0;
+  auto Res = WASINN::Dispatch::initExecCtx(Env, GraphId, NativeContextId);
+  if (!Res || Res.value() != WASINN::ErrNo::Success) {
+    return Res;
+  }
+  if (auto Write =
+          writeUInt32Result(*MemInst, ContextPtr, NativeContextId, "Context"sv);
+      !Write) {
     return WASINN::ErrNo::InvalidArgument;
   }
-  if (!Env.NNGraph[GraphId].isReady()) {
-    spdlog::error("[WASI-NN] init_execution_context: Graph ID {} is invalid. "
-                  "Please reload or unload this graph."sv,
-                  GraphId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (const auto Backend = Env.NNGraph[GraphId].getBackend()) {
-#define EACH(B)                                                                \
-  case WASINN::Backend::B:                                                     \
-    return WASINN::B::initExecCtx(Env, GraphId, *Context);
-    FOR_EACH_BACKEND(EACH)
-#undef EACH
-  default:
-    reportUnknownBackend(Backend);
-    return WASINN::ErrNo::InvalidEncoding;
-  }
+  return Res;
 }
 
 Expect<WASINN::ErrNo>
 WasiNNSetInput::bodyImpl(const Runtime::CallingFrame &Frame, uint32_t ContextId,
                          uint32_t Index, uint32_t TensorPtr) {
-  Env.setEnviron(&Frame);
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
+  EXPECTED_TRY(auto *MemInst, getMemoryInstance(Frame));
 
-  // Tensor's Layout:
-  //   | dim buf | dim buf len | rtype | data buf | data buf len |
-  struct WasiTensorData {
-    uint32_t DimensionPtr;
-    uint32_t DimensionLen;
-    uint32_t RType;
-    uint32_t TensorPtr;
-    uint32_t TensorLen;
-  };
-  // Get the tensor.
-  auto *WasiTensor = MemInst->getPointer<const WasiTensorData *>(TensorPtr);
-  if (unlikely(WasiTensor == nullptr)) {
-    spdlog::error("[WASI-NN] Failed when accessing the Tensor memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  WASINN::TensorData Tensor;
-  Tensor.Dimension =
-      MemInst->getSpan<uint32_t>(EndianValue(WasiTensor->DimensionPtr).le(),
-                                 EndianValue(WasiTensor->DimensionLen).le());
-  if (unlikely(Tensor.Dimension.size() !=
-               EndianValue(WasiTensor->DimensionLen).le())) {
-    spdlog::error("[WASI-NN] Failed when accessing the Dimension memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-  Tensor.Tensor =
-      MemInst->getSpan<uint8_t>(EndianValue(WasiTensor->TensorPtr).le(),
-                                EndianValue(WasiTensor->TensorLen).le());
-  if (unlikely(Tensor.Tensor.size() !=
-               EndianValue(WasiTensor->TensorLen).le())) {
-    spdlog::error("[WASI-NN] Failed when accessing the TensorData memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-  switch (const auto RType = static_cast<WASINN::TensorType>(
-              EndianValue(WasiTensor->RType).le())) {
-  case WASINN::TensorType::F16:
-  case WASINN::TensorType::F32:
-  case WASINN::TensorType::U8:
-  case WASINN::TensorType::I32:
-    Tensor.RType = RType;
-    break;
-  default:
-    spdlog::error("[WASI-NN] Unknown tensor type {}."sv,
-                  static_cast<uint32_t>(RType));
+  auto Tensor = getTensor(*MemInst, TensorPtr);
+  if (!Tensor) {
     return WASINN::ErrNo::InvalidArgument;
   }
 
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::GraphExecutionContextResource::NewStub(
-        Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::SetInputRequest Req;
-    Req.set_resource_handle(ContextId);
-    Req.set_index(Index);
-    wasi_ephemeral_nn::Tensor RPCTensor;
-    RPCTensor.mutable_dimensions()->Add(Tensor.Dimension.begin(),
-                                        Tensor.Dimension.end());
-    RPCTensor.set_ty(wasi_ephemeral_nn::TensorType(Tensor.RType));
-    RPCTensor.set_data(MemInst->getPointer<char *>(WasiTensor->TensorPtr),
-                       WasiTensor->TensorLen);
-    *Req.mutable_tensor() = RPCTensor;
-    google::protobuf::Empty Res;
-    auto Status = Stub->SetInput(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
-    }
-    return WASINN::ErrNo::Success;
+  if (Env.hasRPCChannel()) {
+    return WASINN::RPC::setInput(Env, *MemInst, ContextId, Index, *Tensor);
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
 
-  if (Env.NNContext.size() <= ContextId ||
-      !Env.NNContext[ContextId].isReady()) {
-    spdlog::error("[WASI-NN] set_input: Context ID {} does not exist."sv,
-                  ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (const auto Backend = Env.NNContext[ContextId].getBackend()) {
-#define EACH(B)                                                                \
-  case WASINN::Backend::B:                                                     \
-    return WASINN::B::setInput(Env, ContextId, Index, Tensor);
-    FOR_EACH_BACKEND(EACH)
-#undef EACH
-  default:
-    reportUnknownBackend(Backend);
-    return WASINN::ErrNo::InvalidEncoding;
-  }
+  return WASINN::Dispatch::setInput(Env, ContextId, Index, Tensor->Data);
 }
 
 Expect<WASINN::ErrNo>
@@ -393,359 +243,124 @@ WasiNNGetOutput::bodyImpl(const Runtime::CallingFrame &Frame,
                           uint32_t ContextId, uint32_t Index,
                           uint32_t OutBufferPtr, uint32_t OutBufferMaxSize,
                           uint32_t BytesWrittenPtr) {
-  Env.setEnviron(&Frame);
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
-
-  const auto OutBuffer =
-      MemInst->getSpan<uint8_t>(OutBufferPtr, OutBufferMaxSize);
-  if (unlikely(OutBuffer.data() == nullptr)) {
-    spdlog::error(
-        "[WASI-NN] Failed when accessing the Output Buffer memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-  uint32_t *BytesWritten = MemInst->getPointer<uint32_t *>(BytesWrittenPtr);
-  if (unlikely(BytesWritten == nullptr)) {
-    spdlog::error("[WASI-NN] Failed when accessing the BytesWritten memory."sv);
+  EXPECTED_TRY(auto *MemInst, getMemoryInstance(Frame));
+  auto Output = getOutputBuffer(*MemInst, OutBufferPtr, OutBufferMaxSize,
+                                BytesWrittenPtr);
+  if (!Output) {
     return WASINN::ErrNo::InvalidArgument;
   }
 
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::GraphExecutionContextResource::NewStub(
-        Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::GetOutputRequest Req;
-    Req.set_resource_handle(ContextId);
-    Req.set_index(Index);
-    wasi_ephemeral_nn::GetOutputResult Res;
-    auto Status = Stub->GetOutput(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
-    }
-    uint32_t BytesWrittenVal =
-        std::min(static_cast<uint32_t>(Res.data().size()), OutBufferMaxSize);
-    std::copy_n(Res.data().begin(), BytesWrittenVal, OutBuffer.begin());
-    *BytesWritten = BytesWrittenVal;
-    return WASINN::ErrNo::Success;
+  if (Env.hasRPCChannel()) {
+    return runOutputAndWriteSize(
+        *MemInst, *Output,
+        [&](Span<uint8_t> OutBuffer, uint32_t &NativeBytesWritten) {
+          return WASINN::RPC::getOutput(Env, ContextId, Index, OutBuffer,
+                                        NativeBytesWritten);
+        });
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
 
-  if (Env.NNContext.size() <= ContextId ||
-      !Env.NNContext[ContextId].isReady()) {
-    spdlog::error("[WASI-NN] get_output: Context ID {} does not exist."sv,
-                  ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (const auto Backend = Env.NNContext[ContextId].getBackend()) {
-#define EACH(B)                                                                \
-  case WASINN::Backend::B:                                                     \
-    return WASINN::B::getOutput(Env, ContextId, Index, OutBuffer,              \
-                                *BytesWritten);
-    FOR_EACH_BACKEND(EACH)
-#undef EACH
-  default:
-    reportUnknownBackend(Backend);
-    return WASINN::ErrNo::InvalidEncoding;
-  }
+  return runOutputAndWriteSize(
+      *MemInst, *Output,
+      [&](Span<uint8_t> OutBuffer, uint32_t &NativeBytesWritten) {
+        return WASINN::Dispatch::getOutput(Env, ContextId, Index, OutBuffer,
+                                           NativeBytesWritten);
+      });
 }
 
 Expect<WASINN::ErrNo> WasiNNGetOutputSingle::bodyImpl(
     const Runtime::CallingFrame &Frame, uint32_t ContextId, uint32_t Index,
     uint32_t OutBufferPtr, uint32_t OutBufferMaxSize,
     uint32_t BytesWrittenPtr) {
-  Env.setEnviron(&Frame);
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
-
-  const auto OutBuffer =
-      MemInst->getSpan<uint8_t>(OutBufferPtr, OutBufferMaxSize);
-  if (unlikely(OutBuffer.data() == nullptr)) {
-    spdlog::error(
-        "[WASI-NN] Failed when accessing the Output Buffer memory."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-  uint32_t *BytesWritten = MemInst->getPointer<uint32_t *>(BytesWrittenPtr);
-  if (unlikely(BytesWritten == nullptr)) {
-    spdlog::error("[WASI-NN] Failed when accessing the BytesWritten memory."sv);
+  EXPECTED_TRY(auto *MemInst, getMemoryInstance(Frame));
+  auto Output = getOutputBuffer(*MemInst, OutBufferPtr, OutBufferMaxSize,
+                                BytesWrittenPtr);
+  if (!Output) {
     return WASINN::ErrNo::InvalidArgument;
   }
 
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::GraphExecutionContextResource::NewStub(
-        Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::GetOutputRequest Req;
-    Req.set_resource_handle(ContextId);
-    Req.set_index(Index);
-    wasi_ephemeral_nn::GetOutputResult Res;
-    auto Status = Stub->GetOutputSingle(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
-    }
-    uint32_t BytesWrittenVal =
-        std::min(static_cast<uint32_t>(Res.data().size()), OutBufferMaxSize);
-    std::copy_n(Res.data().begin(), BytesWrittenVal, OutBuffer.begin());
-    *BytesWritten = BytesWrittenVal;
-    return WASINN::ErrNo::Success;
+  if (Env.hasRPCChannel()) {
+    return runOutputAndWriteSize(
+        *MemInst, *Output,
+        [&](Span<uint8_t> OutBuffer, uint32_t &NativeBytesWritten) {
+          return WASINN::RPC::getOutputSingle(Env, ContextId, Index, OutBuffer,
+                                              NativeBytesWritten);
+        });
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
 
-  if (Env.NNContext.size() <= ContextId ||
-      !Env.NNContext[ContextId].isReady()) {
-    spdlog::error(
-        "[WASI-NN] get_output_single: Context ID {} does not exist."sv,
-        ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (Env.NNContext[ContextId].getBackend()) {
-  case WASINN::Backend::GGML:
-    return WASINN::GGML::getOutputSingle(Env, ContextId, Index, OutBuffer,
-                                         *BytesWritten);
-  case WASINN::Backend::BitNet:
-    return WASINN::BitNet::getOutputSingle(Env, ContextId, Index, OutBuffer,
-                                           *BytesWritten);
-  default:
-    spdlog::error(
-        "[WASI-NN] get_output_single: Only GGML and BitNet backend supports "sv
-        "get_output_single."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
+  return runOutputAndWriteSize(
+      *MemInst, *Output,
+      [&](Span<uint8_t> OutBuffer, uint32_t &NativeBytesWritten) {
+        return WASINN::Dispatch::getOutputSingle(Env, ContextId, Index,
+                                                 OutBuffer, NativeBytesWritten);
+      });
 }
 
 Expect<WASINN::ErrNo>
 WasiNNCompute::bodyImpl(const Runtime::CallingFrame &Frame,
                         uint32_t ContextId) {
-  Env.setEnviron(&Frame);
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::GraphExecutionContextResource::NewStub(
-        Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::ComputeRequest Req;
-    Req.set_resource_handle(ContextId);
-    google::protobuf::Empty Res;
-    auto Status = Stub->Compute(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
-    }
-    return WASINN::ErrNo::Success;
+  if (Env.hasRPCChannel()) {
+    return WASINN::RPC::compute(Env, ContextId);
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
+  EXPECTED_TRY(checkMemoryInstance(Frame));
 
-  if (Env.NNContext.size() <= ContextId ||
-      !Env.NNContext[ContextId].isReady()) {
-    spdlog::error("[WASI-NN] compute: Context ID {} does not exist."sv,
-                  ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  auto GraphId = Env.NNContext[ContextId].getGraphId();
-  assuming(Env.NNGraph.size() > GraphId);
-  if (!Env.NNGraph[GraphId].isReady()) {
-    spdlog::error("[WASI-NN] compute: Graph ID {} for context ID {} does not "sv
-                  "exist or has released."sv,
-                  GraphId, ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (const auto Backend = Env.NNContext[ContextId].getBackend()) {
-#define EACH(B)                                                                \
-  case WASINN::Backend::B:                                                     \
-    return WASINN::B::compute(Env, ContextId);
-    FOR_EACH_BACKEND(EACH)
-#undef EACH
-  default:
-    reportUnknownBackend(Backend);
-    return WASINN::ErrNo::InvalidEncoding;
-  }
+  return WASINN::Dispatch::compute(Env, ContextId);
 }
 
 Expect<WASINN::ErrNo>
 WasiNNComputeSingle::bodyImpl(const Runtime::CallingFrame &Frame,
                               uint32_t ContextId) {
-  Env.setEnviron(&Frame);
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::GraphExecutionContextResource::NewStub(
-        Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::ComputeRequest Req;
-    Req.set_resource_handle(ContextId);
-    google::protobuf::Empty Res;
-    auto Status = Stub->ComputeSingle(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
-    }
-    return WASINN::ErrNo::Success;
+  if (Env.hasRPCChannel()) {
+    return WASINN::RPC::computeSingle(Env, ContextId);
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
+  EXPECTED_TRY(checkMemoryInstance(Frame));
 
-  if (Env.NNContext.size() <= ContextId ||
-      !Env.NNContext[ContextId].isReady()) {
-    spdlog::error("[WASI-NN] compute_single: Context ID {} does not exist."sv,
-                  ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  auto GraphId = Env.NNContext[ContextId].getGraphId();
-  assuming(Env.NNGraph.size() > GraphId);
-  if (!Env.NNGraph[GraphId].isReady()) {
-    spdlog::error("[WASI-NN] compute_single: Graph ID {} for context ID {} "sv
-                  "does not exist or has released."sv,
-                  GraphId, ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (Env.NNContext[ContextId].getBackend()) {
-  case WASINN::Backend::GGML:
-    return WASINN::GGML::computeSingle(Env, ContextId);
-  case WASINN::Backend::BitNet:
-    return WASINN::BitNet::computeSingle(Env, ContextId);
-  default:
-    spdlog::error(
-        "[WASI-NN] compute_single: Only GGML and BitNet backend supports "sv
-        "compute_single."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
+  return WASINN::Dispatch::computeSingle(Env, ContextId);
 }
 
 Expect<WASINN::ErrNo>
 WasiNNFiniSingle::bodyImpl(const Runtime::CallingFrame &Frame,
                            uint32_t ContextId) {
-  Env.setEnviron(&Frame);
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    auto Stub = wasi_ephemeral_nn::GraphExecutionContextResource::NewStub(
-        Env.NNRPCChannel);
-    grpc::ClientContext ClientContext;
-    wasi_ephemeral_nn::FiniSingleRequest Req;
-    Req.set_resource_handle(ContextId);
-    google::protobuf::Empty Res;
-    auto Status = Stub->FiniSingle(&ClientContext, Req, &Res);
-    if (!Status.ok()) {
-      auto Metadata = ClientContext.GetServerTrailingMetadata();
-      return metadataToErrNo(Metadata);
-    }
-    return WASINN::ErrNo::Success;
+  if (Env.hasRPCChannel()) {
+    return WASINN::RPC::finiSingle(Env, ContextId);
   }
 #endif // ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
+  EXPECTED_TRY(checkMemoryInstance(Frame));
 
-  if (Env.NNContext.size() <= ContextId ||
-      !Env.NNContext[ContextId].isReady()) {
-    spdlog::error("[WASI-NN] fini_single: Context ID {} does not exist."sv,
-                  ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (Env.NNContext[ContextId].getBackend()) {
-  case WASINN::Backend::GGML:
-    return WASINN::GGML::finiSingle(Env, ContextId);
-  case WASINN::Backend::BitNet:
-    return WASINN::BitNet::finiSingle(Env, ContextId);
-  default:
-    spdlog::error(
-        "[WASI-NN] fini_single: Only GGML and BitNet backend supports fini_single."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
+  return WASINN::Dispatch::finiSingle(Env, ContextId);
 }
 
 Expect<WASINN::ErrNo> WasiNNUnload::bodyImpl(const Runtime::CallingFrame &Frame,
                                              uint32_t GraphId) {
-  Env.setEnviron(&Frame);
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    // TODO: implement RPC for unload
-    spdlog::error("[WASI-NN] RPC client is not implemented for unload"sv);
-    return WASINN::ErrNo::UnsupportedOperation;
+  if (Env.hasRPCChannel()) {
+    return WASINN::RPC::unload();
   }
 #endif
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
+  EXPECTED_TRY(checkMemoryInstance(Frame));
 
-  if (Env.NNGraph.size() <= GraphId) {
-    spdlog::error("[WASI-NN] unload: GraphId {} does not exist."sv, GraphId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (Env.NNGraph[GraphId].getBackend()) {
-  case WASINN::Backend::GGML:
-    return WASINN::GGML::unload(Env, GraphId);
-  case WASINN::Backend::Whisper:
-    return WASINN::Whisper::unload(Env, GraphId);
-  case WASINN::Backend::ChatTTS:
-    return WASINN::ChatTTS::unload(Env, GraphId);
-  case WASINN::Backend::BitNet:
-    return WASINN::BitNet::unload(Env, GraphId);
-  default:
-    spdlog::error("[WASI-NN] unload: Only GGML, Whisper, ChatTTS and BitNet "sv
-                  "backends support unload."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
+  return WASINN::Dispatch::unload(Env, GraphId);
 }
 
 Expect<WASINN::ErrNo>
 WasiNNFinalizeExecCtx::bodyImpl(const Runtime::CallingFrame &Frame,
                                 uint32_t ContextId) {
-  Env.setEnviron(&Frame);
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
-  if (Env.NNRPCChannel != nullptr) {
-    // TODO: implement RPC for finalize_execution_context
-    spdlog::error("[WASI-NN] RPC client is not implemented for "sv
-                  "finalize_execution_context"sv);
-    return WASINN::ErrNo::UnsupportedOperation;
+  if (Env.hasRPCChannel()) {
+    return WASINN::RPC::finalizeExecCtx();
   }
 #endif
-  auto *MemInst = Frame.getMemoryByIndex(0);
-  if (MemInst == nullptr) {
-    return Unexpect(ErrCode::Value::HostFuncError);
-  }
+  EXPECTED_TRY(checkMemoryInstance(Frame));
 
-  if (Env.NNContext.size() <= ContextId) {
-    spdlog::error(
-        "[WASI-NN] finalize_execution_context: Context ID {} does not exist."sv,
-        ContextId);
-    return WASINN::ErrNo::InvalidArgument;
-  }
-
-  switch (Env.NNContext[ContextId].getBackend()) {
-  case WASINN::Backend::GGML:
-    return WASINN::GGML::finalizeExecCtx(Env, ContextId);
-  case WASINN::Backend::Whisper:
-    return WASINN::Whisper::finalizeExecCtx(Env, ContextId);
-  case WASINN::Backend::BitNet:
-    return WASINN::BitNet::finalizeExecCtx(Env, ContextId);
-  default:
-    spdlog::error(
-        "[WASI-NN] finalize_execution_context: Only GGML, BitNet and "sv
-        "Whisper backends support finalize_execution_context."sv);
-    return WASINN::ErrNo::InvalidArgument;
-  }
+  return WASINN::Dispatch::finalizeExecCtx(Env, ContextId);
 }
 
 } // namespace Host

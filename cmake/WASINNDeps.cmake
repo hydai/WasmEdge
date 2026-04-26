@@ -123,6 +123,21 @@ function(wasmedge_setup_wasinn_target target)
   endforeach()
 endfunction()
 
+function(wasmedge_link_wasinn_backend_dependencies target source_target)
+  get_target_property(WASMEDGE_WASINN_LINK_LIBRARIES ${source_target} LINK_LIBRARIES)
+  if(WASMEDGE_WASINN_LINK_LIBRARIES)
+    foreach(WASMEDGE_WASINN_LINK_LIBRARY ${WASMEDGE_WASINN_LINK_LIBRARIES})
+      if(WASMEDGE_WASINN_LINK_LIBRARY STREQUAL "simdjson::simdjson" AND NOT TARGET simdjson::simdjson)
+        wasmedge_setup_simdjson()
+      endif()
+    endforeach()
+    target_link_libraries(${target}
+      PRIVATE
+      ${WASMEDGE_WASINN_LINK_LIBRARIES}
+    )
+  endif()
+endfunction()
+
 # Function of preparing TensorFlow related variables.
 if(NOT WASMEDGE_DEPS_VERSION)
   set(WASMEDGE_DEPS_VERSION "TF-2.12.0-CC")

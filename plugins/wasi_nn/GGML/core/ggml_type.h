@@ -12,9 +12,11 @@
 #include <list>
 #include <llama-cpp.h>
 #include <llama.h>
+#include <memory>
 #include <mtmd.h>
 #include <sampling.h>
 
+#include "wasinn_llama_batch.h"
 #endif
 
 namespace WasmEdge::Host::WASINN::GGML {
@@ -67,8 +69,7 @@ struct Graph {
 
 struct Context {
 public:
-  Context(uint32_t GId, Graph &G) noexcept : GraphId(GId), Conf(G.Conf) {}
-  uint32_t GraphId;
+  Context(uint32_t, Graph &G) noexcept : Conf(G.Conf) {}
   // Llama inputs:
   std::vector<llama_token> LlamaInputs;
   uint64_t LlamaNInputs = 0;
@@ -77,11 +78,11 @@ public:
   std::vector<llama_token> LlamaOutputTokens;
   // Data for computing:
   bool ComputeSingleStarted = false;
-  struct common_sampler *LlamaSampler = nullptr;
+  CommonSamplerPtr LlamaSampler = nullptr;
   // Handle the batch in the context to prevent from reallocation in every
   // computing.
-  struct llama_batch LlamaBatch;
-  struct llama_batch OutputBatch;
+  LlamaBatchHolder LlamaBatch;
+  LlamaBatchHolder OutputBatch;
   int64_t CurrentBatchSize = 0;
   size_t ImagePosition = 0;
   int32_t NPos = 0;

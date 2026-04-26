@@ -9,6 +9,7 @@
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_OPENVINO
 #include "openvino/openvino.hpp"
+#include <memory>
 #endif
 
 namespace WasmEdge::Host::WASINN {
@@ -18,22 +19,17 @@ struct WasiNNEnvironment;
 namespace WasmEdge::Host::WASINN::OpenVINO {
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_OPENVINO
 struct Graph {
-  ~Graph() noexcept {}
   ov::Tensor OpenVINOIWeightTensor;
   std::shared_ptr<ov::Model> OpenVINOModel;
   Device TargetDevice = Device::AUTO;
 };
 
 struct Context {
-  Context(uint32_t GId, Graph &) noexcept : GraphId(GId) {}
-  ~Context() noexcept {}
-  uint32_t GraphId;
+  Context(uint32_t, Graph &) noexcept {}
   ov::InferRequest OpenVINOInferRequest;
 };
 
 struct Environ {
-  Environ() noexcept {}
-  ~Environ() noexcept {}
   ov::Core OpenVINOCore;
 };
 #else

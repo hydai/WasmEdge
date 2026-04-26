@@ -6,6 +6,8 @@
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_GGML
 #include <fmt/ranges.h>
+#include <mtmd-helper.h>
+#include <mtmd.h>
 #endif
 
 namespace WasmEdge::Host::WASINN::GGML {
@@ -131,7 +133,7 @@ ErrNo evaluateInput(Graph &GraphRef, Context &CxtRef,
   ReturnCode =
       evaluateTokens(Span<const llama_token>(CxtRef.LlamaInputs.begin(),
                                              CxtRef.LlamaInputs.size()),
-                     GraphRef, CxtRef.LlamaBatch, CxtRef.NPos, true);
+                     GraphRef, CxtRef.LlamaBatch.get(), CxtRef.NPos, true);
   if (ReturnCode != ErrNo::Success) {
     RET_ERROR(ReturnCode, "{}: failed to evaluate input tokens."sv, LogPrefix)
   }
@@ -139,11 +141,31 @@ ErrNo evaluateInput(Graph &GraphRef, Context &CxtRef,
   return ErrNo::Success;
 }
 
+ErrNo evaluatePrompt(Graph &GraphRef, Context &CxtRef,
+                     std::string_view LogPrefix) noexcept {
+  if (GraphRef.VisionContext == nullptr) {
+    return evaluateInput(GraphRef, CxtRef, LogPrefix);
+  }
+
+  llama_pos NewNPos;
+  int32_t Res = mtmd_helper_eval_chunks(
+      GraphRef.VisionContext.get(), GraphRef.LlamaContext.get(),
+      GraphRef.VisionInputChunks.get(), CxtRef.NPos,
+      /* seq_id */ 0, static_cast<int32_t>(CxtRef.CurrentBatchSize),
+      /* logits_last */ true, &NewNPos);
+  CxtRef.NPos = NewNPos;
+  if (Res != 0) {
+    RET_ERROR(ErrNo::InvalidArgument, "{}: unable to eval the mtmd prompt."sv,
+              LogPrefix)
+  }
+  return ErrNo::Success;
+}
+
 // Clear the context and reset the sampler.
 void clearContext(Graph &GraphRef, Context &CxtRef) noexcept {
   LOG_DEBUG(GraphRef.EnableDebugLog, "{}: clearContext"sv)
   llama_memory_clear(llama_get_memory(GraphRef.LlamaContext.get()), true);
-  common_sampler_reset(CxtRef.LlamaSampler);
+  common_sampler_reset(CxtRef.LlamaSampler.get());
   CxtRef.NPos = 0;
   CxtRef.LlamaOutputs.clear();
   CxtRef.LlamaOutputTokens.clear();
@@ -184,14 +206,15 @@ Expect<ErrNo> getEmbedding(Graph &GraphRef, Context &CxtRef) noexcept {
   const int32_t NEmbd = llama_model_n_embd(GraphRef.LlamaModel.get());
   std::vector<float> Embeddings(NEmbd);
 
-  for (int I = 0; I < CxtRef.LlamaBatch.n_tokens; I++) {
-    if (!CxtRef.LlamaBatch.logits[I]) {
+  const auto &Batch = CxtRef.LlamaBatch.get();
+  for (int I = 0; I < Batch.n_tokens; I++) {
+    if (!Batch.logits[I]) {
       continue;
     }
 
     // Try to get sequence embeddings.
     auto *Embd = llama_get_embeddings_seq(GraphRef.LlamaContext.get(),
-                                          CxtRef.LlamaBatch.seq_id[I][0]);
+                                          Batch.seq_id[I][0]);
     if (Embd == nullptr) {
       Embd = llama_get_embeddings_ith(GraphRef.LlamaContext.get(), I);
       if (Embd == nullptr) {
@@ -223,8 +246,9 @@ ErrNo sampleOutput(Graph &GraphRef, Context &CxtRef,
                    bool IsSingleTokenMode) noexcept {
   // Use idx = -1 to sample the next token.
   const llama_token Id = common_sampler_sample(
-      CxtRef.LlamaSampler, GraphRef.LlamaContext.get(), /* idx */ -1);
-  common_sampler_accept(CxtRef.LlamaSampler, Id, /* accept_grammar */ true);
+      CxtRef.LlamaSampler.get(), GraphRef.LlamaContext.get(), /* idx */ -1);
+  common_sampler_accept(CxtRef.LlamaSampler.get(), Id,
+                        /* accept_grammar */ true);
 
   // Save the output token.
   CxtRef.LlamaOutputTokens.emplace_back(Id);
@@ -252,13 +276,14 @@ ErrNo sampleOutput(Graph &GraphRef, Context &CxtRef,
   const llama_vocab *Vocab = llama_model_get_vocab(GraphRef.LlamaModel.get());
   // Only stop on EOS if GraphRef.Params.sampling.ignore_eos is false.
   if (!GraphRef.Params.sampling.ignore_eos &&
-      llama_vocab_is_eog(Vocab, common_sampler_last(CxtRef.LlamaSampler))) {
+      llama_vocab_is_eog(Vocab,
+                         common_sampler_last(CxtRef.LlamaSampler.get()))) {
     LOG_INFO(GraphRef.EnableLog, "sampleOutput: EOS token found."sv)
     return ErrNo::EndOfSequence;
   }
   // Evaluate the output token.
   return evaluateTokens(Span<const llama_token>(&Id, 1), GraphRef,
-                        CxtRef.OutputBatch, CxtRef.NPos, true);
+                        CxtRef.OutputBatch.get(), CxtRef.NPos, true);
 }
 
 #endif

@@ -13,6 +13,7 @@
 #ifdef TORCHAOTI_USE_CUDA
 #include <torch/csrc/inductor/aoti_runner/model_container_runner_cuda.h>
 #endif
+#include <memory>
 #include <torch/script.h>
 #include <vector>
 #endif
@@ -63,25 +64,18 @@ public:
   Expect<ErrNo> run(std::vector<at::Tensor> In,
                     std::vector<at::Tensor> &Out) override;
 
-  torch::inductor::AOTIModelContainerRunner *TorchModel;
-
-  ~AOTInductor() {
-    if (TorchModel) {
-      delete TorchModel;
-    }
-  }
+  std::unique_ptr<torch::inductor::AOTIModelContainerRunner> TorchModel;
 };
 
 enum class PyModelBackend { TorchScript, AOTInductor, UNKNOWN };
 
 struct Graph {
-  PyBaseModule *Model = nullptr;
+  std::unique_ptr<PyBaseModule> Model = nullptr;
 };
 
 struct Context {
 public:
-  Context(uint32_t GId, Graph &) noexcept : GraphId(GId) {}
-  uint32_t GraphId;
+  Context(uint32_t, Graph &) noexcept {}
   std::vector<at::Tensor> TorchInputs;
   std::vector<at::Tensor> TorchOutputs;
 };

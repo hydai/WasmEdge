@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2019-2024 Second State INC
 
 #include "metadata_parser.h"
+#include "wasinn_metadata.h"
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_GGML
 #include <common.h>
@@ -12,6 +13,10 @@
 
 namespace WasmEdge::Host::WASINN::GGML {
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_GGML
+namespace {
+using namespace std::literals;
+} // namespace
+
 // Parse metadata from json.
 ErrNo parseMetadata(Graph &GraphRef, LocalConfig &ConfRef,
                     const std::string &Metadata, bool *IsModelUpdated,
@@ -68,30 +73,12 @@ ErrNo parseMetadata(Graph &GraphRef, LocalConfig &ConfRef,
         });
     parseJsonWithProcessorAuto<std::string_view>(
         Doc, "tensor-split", [&GraphRef](const std::string_view &TSV) -> bool {
-          // The TensorSplit is a comma-separated list of non-negative values.
-          // E.g., "3,2" presents 60% of the data to GPU 0 and 40% to GPU 1.
-          std::string TS(TSV);
-          std::replace(TS.begin(), TS.end(), ',', ' ');
-          std::stringstream SS(TS);
-          std::memset(GraphRef.Params.tensor_split, 0,
-                      sizeof(GraphRef.Params.tensor_split));
-          uint32_t TensorSplitSize = 0;
-          while (SS.good()) {
-            float TmpTensor;
-            SS >> TmpTensor;
-            GraphRef.Params.tensor_split[TensorSplitSize++] = TmpTensor;
-          }
-          size_t NDevices = llama_max_devices();
-          if (TensorSplitSize > NDevices) {
-            spdlog::error(
-                "[WASI-NN] GGML backend: Number of Tensor-Split is larger than "
-                "MaxDevices, please reduce the size of tensor-split.");
-            return false;
-          }
-          for (size_t Idx = TensorSplitSize; Idx < NDevices; Idx++) {
-            GraphRef.Params.tensor_split[TensorSplitSize++] = 0.0f;
-          }
-          return true;
+          const auto TensorSplitCapacity =
+              sizeof(GraphRef.Params.tensor_split) /
+              sizeof(GraphRef.Params.tensor_split[0]);
+          return parseTensorSplit(TSV, GraphRef.Params.tensor_split,
+                                  TensorSplitCapacity, llama_max_devices(),
+                                  "GGML"sv) == ErrNo::Success;
         });
     parseJsonAuto<bool>(Doc, "embedding", GraphRef.Params.embedding);
     parseJsonWithProcessorAuto<std::string_view>(

@@ -76,14 +76,13 @@ struct PiperDeleter {
 };
 
 struct Graph {
-  std::unique_ptr<RunConfig> Config;
+  RunConfig Config;
   std::unique_ptr<piper_synthesizer, PiperDeleter> Synth;
 };
 struct Context {
-  Context(uint32_t GId, Graph &) noexcept : GraphId(GId) {}
-  uint32_t GraphId;
+  Context(uint32_t, Graph &) noexcept {}
   std::optional<std::string> Line;
-  std::unique_ptr<std::optional<SynthesisConfig>> JsonInputSynthesisConfig;
+  std::optional<SynthesisConfig> JsonInputSynthesisConfig;
   std::optional<std::vector<uint8_t>> Output;
 };
 #else

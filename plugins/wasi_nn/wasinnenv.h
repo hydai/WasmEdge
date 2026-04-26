@@ -3,19 +3,7 @@
 
 #pragma once
 
-#include "GGML/core/ggml_core.h"
-#include "wasinn_bitnet.h"
-#include "wasinn_chattts.h"
-#include "wasinn_mlx.h"
-#include "wasinn_neuralspeed.h"
-#include "wasinn_onnx.h"
-#include "wasinn_openvino.h"
-#include "wasinn_openvino_genai.h"
-#include "wasinn_piper.h"
-#include "wasinn_tf.h"
-#include "wasinn_tfl.h"
-#include "wasinn_torch.h"
-#include "wasinn_whisper.h"
+#include "wasinn_graph.h"
 #include "wasinntypes.h"
 
 #include "host/wasi/environ.h"
@@ -26,9 +14,16 @@
 #include "runtime/callingframe.h"
 
 #include <cstdint>
+#include <deque>
 #include <functional>
-#include <unordered_map>
-#include <unordered_set>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <shared_mutex>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
@@ -40,188 +35,7 @@ namespace WasmEdge {
 namespace Host {
 namespace WASINN {
 
-namespace detail {
-template <typename T, typename V> struct VariantIndex;
-
-template <typename T, typename... Types>
-struct VariantIndex<T, std::variant<T, Types...>>
-    : std::integral_constant<size_t, 0> {};
-
-template <typename T, typename H, typename... Types>
-struct VariantIndex<T, std::variant<H, Types...>>
-    : std::integral_constant<
-          std::size_t, VariantIndex<T, std::variant<Types...>>::value + 1> {};
-
-template <typename T, typename V>
-inline constexpr std::size_t VariantIndexV = VariantIndex<T, V>::value;
-
-template <Backend B> struct BackendTrait;
-#define EACH(B)                                                                \
-  template <> struct BackendTrait<Backend::B> {                                \
-    using Graph = B::Graph;                                                    \
-    using Context = B::Context;                                                \
-  };
-FOR_EACH_BACKEND(EACH)
-#undef EACH
-
-template <Backend B> using BackendGraphT = typename BackendTrait<B>::Graph;
-template <Backend B> using BackendContextT = typename BackendTrait<B>::Context;
-} // namespace detail
-
-class Graph {
-public:
-  Graph() = delete;
-  Graph(Backend BE) noexcept : Impl(std::in_place_type_t<std::monostate>()) {
-    init(BE);
-  }
-
-  Backend getBackend() const noexcept {
-    using V = std::decay_t<decltype(Impl)>;
-    switch (Impl.index()) {
-#define EACH(B)                                                                \
-  case detail::VariantIndexV<B::Graph, V>:                                     \
-    return Backend::B;
-      FOR_EACH_BACKEND(EACH)
-#undef EACH
-    default:
-      __builtin_unreachable();
-    }
-  }
-
-  template <Backend B> auto &get() noexcept {
-    return *std::get_if<detail::BackendGraphT<B>>(&Impl);
-  }
-  template <Backend B> const auto &get() const noexcept {
-    return *std::get_if<detail::BackendGraphT<B>>(&Impl);
-  }
-  template <typename T> auto &get() noexcept { return *std::get_if<T>(&Impl); }
-  template <typename T> const auto &get() const noexcept {
-    return *std::get_if<T>(&Impl);
-  }
-
-  void init(Backend BE) noexcept {
-    switch (BE) {
-#define EACH(B)                                                                \
-  case Backend::B:                                                             \
-    Impl.emplace<B::Graph>();                                                  \
-    break;
-      FOR_EACH_BACKEND(EACH)
-#undef EACH
-    default:
-      __builtin_unreachable();
-    }
-    Stat = Status::Uninitialized;
-    CtxCnt = 0;
-  }
-  void reset() noexcept {
-    Impl = std::monostate{};
-    Stat = Status::Uninitialized;
-    CtxCnt = 0;
-  }
-  void increaseContext() noexcept { CtxCnt++; }
-  void decreaseContext() noexcept {
-    assuming(CtxCnt > 0);
-    CtxCnt--;
-  }
-  uint32_t getContextCount() const noexcept { return CtxCnt; }
-  bool isFinalized() const noexcept {
-    return Stat == Status::Uninitialized || Stat == Status::Finalized;
-  }
-  bool isReady() const noexcept { return Stat == Status::Ready; }
-  void setInvalid() noexcept { Stat = Status::Invalid; }
-  void setFinalized() noexcept { Stat = Status::Finalized; }
-  void setReady() noexcept { Stat = Status::Ready; }
-
-private:
-  std::variant<
-#define EACH(B) B::Graph,
-      FOR_EACH_BACKEND(EACH)
-#undef EACH
-          std::monostate>
-      Impl;
-  // Graph status.
-  //   Uninitialized: A new graph in monostate.
-  //   Invalid: The graph loaded failed in set_input with metadata. Can be
-  //            reload with a new metadata in set_input.
-  //   Finalized: The graph being deleted, but there are contexts linked. This
-  //              graph ID will be released once the contexts are deleted.
-  //   Ready: This graph can be used to create a context.
-  enum class Status : uint8_t { Uninitialized, Invalid, Finalized, Ready };
-  Status Stat;
-  uint32_t CtxCnt;
-};
-
-class Context {
-public:
-  Context() = delete;
-  Context(uint32_t GId, Graph &G) noexcept
-      : Impl(std::in_place_type_t<std::monostate>()) {
-    init(GId, G);
-  }
-
-  Backend getBackend() const noexcept {
-    using V = std::decay_t<decltype(Impl)>;
-    switch (Impl.index()) {
-#define EACH(B)                                                                \
-  case detail::VariantIndexV<B::Context, V>:                                   \
-    return Backend::B;
-      FOR_EACH_BACKEND(EACH)
-#undef EACH
-    default:
-      __builtin_unreachable();
-    }
-  }
-
-  template <Backend B> auto &get() noexcept {
-    return *std::get_if<detail::BackendContextT<B>>(&Impl);
-  }
-  template <Backend B> const auto &get() const noexcept {
-    return *std::get_if<detail::BackendContextT<B>>(&Impl);
-  }
-  template <typename T> auto &get() noexcept { return *std::get_if<T>(&Impl); }
-  template <typename T> const auto &get() const noexcept {
-    return *std::get_if<T>(&Impl);
-  }
-
-  void init(uint32_t GId, Graph &G) noexcept {
-    switch (G.getBackend()) {
-#define EACH(B)                                                                \
-  case Backend::B:                                                             \
-    Impl.emplace<B::Context>(GId, G.get<Backend::B>());                        \
-    break;
-      FOR_EACH_BACKEND(EACH)
-#undef EACH
-    default:
-      __builtin_unreachable();
-    }
-    Stat = Status::Uninitialized;
-    GraphId = GId;
-  }
-  void reset() noexcept {
-    Impl = std::monostate{};
-    Stat = Status::Uninitialized;
-    GraphId = 0;
-  }
-  uint32_t getGraphId() const noexcept {
-    return static_cast<uint32_t>(GraphId);
-  }
-  bool isReady() const noexcept { return Stat == Status::Ready; }
-  void setReady() noexcept { Stat = Status::Ready; }
-
-private:
-  std::variant<
-#define EACH(B) B::Context,
-      FOR_EACH_BACKEND(EACH)
-#undef EACH
-          std::monostate>
-      Impl;
-  // Context status.
-  //   Uninitialized: A new context in monostate.
-  //   Ready: This context can be used to infer.
-  enum class Status : uint8_t { Uninitialized, Ready };
-  Status Stat;
-  uint32_t GraphId;
-};
+class PreloadStore;
 
 struct WasiNNEnvironment :
 #define EACH(B) B::Environ,
@@ -234,157 +48,307 @@ struct WasiNNEnvironment :
       WASINN::Device, uint32_t &)>;
 
   WasiNNEnvironment() noexcept;
+  ~WasiNNEnvironment() noexcept;
 
-  bool mdGet(std::string Name, uint32_t &GraphId) noexcept {
-    std::shared_lock Lock(MdMutex);
-    if (auto It = MdMap.find(Name); It != MdMap.end()) {
-      GraphId = EndianValue(static_cast<uint32_t>(It->second)).le();
-      return true;
-    }
-    return false;
-  }
-
-  void mdRemoveById(uint32_t GraphId) noexcept {
-    std::unique_lock Lock(MdMutex);
-    for (auto It = MdMap.begin(); It != MdMap.end();) {
-      if (It->second == static_cast<uint32_t>(GraphId)) {
-        It = MdMap.erase(It);
-      } else {
-        ++It;
+  class GraphGuard {
+  public:
+    GraphGuard(WasiNNEnvironment &E, Backend BE) noexcept
+        : Env(E), Id(E.newGraph(BE)) {}
+    ~GraphGuard() noexcept {
+      if (Active) {
+        Env.deleteGraph(Id);
       }
     }
-  }
+    GraphGuard(const GraphGuard &) = delete;
+    GraphGuard &operator=(const GraphGuard &) = delete;
+    GraphGuard(GraphGuard &&Other) noexcept
+        : Env(Other.Env), Id(Other.Id), Active(Other.Active) {
+      Other.Active = false;
+    }
+    GraphGuard &operator=(GraphGuard &&) = delete;
 
+    uint32_t id() const noexcept { return Id; }
+    template <Backend B> detail::BackendGraphT<B> &get() noexcept {
+      return Env.getBackendGraph<B>(Id);
+    }
+    uint32_t commit() noexcept {
+      Env.setGraphReady(Id);
+      Active = false;
+      return Id;
+    }
+
+  private:
+    WasiNNEnvironment &Env;
+    uint32_t Id;
+    bool Active = true;
+  };
+
+  class ContextGuard {
+  public:
+    ContextGuard(WasiNNEnvironment &E, uint32_t GId) noexcept
+        : Env(E), Id(E.newContext(GId)), Active(Id != GraphStore::InvalidId) {}
+    ~ContextGuard() noexcept {
+      if (Active) {
+        Env.deleteContext(Id);
+      }
+    }
+    ContextGuard(const ContextGuard &) = delete;
+    ContextGuard &operator=(const ContextGuard &) = delete;
+    ContextGuard(ContextGuard &&Other) noexcept
+        : Env(Other.Env), Id(Other.Id), Active(Other.Active) {
+      Other.Active = false;
+    }
+    ContextGuard &operator=(ContextGuard &&) = delete;
+
+    uint32_t id() const noexcept { return Id; }
+    bool valid() const noexcept { return Id != GraphStore::InvalidId; }
+    template <Backend B> detail::BackendContextT<B> &get() noexcept {
+      assuming(valid());
+      return Env.getBackendContext<B>(Id);
+    }
+    uint32_t commit() noexcept {
+      if (!valid()) {
+        return Id;
+      }
+      Env.setContextReady(Id);
+      Active = false;
+      return Id;
+    }
+
+  private:
+    WasiNNEnvironment &Env;
+    uint32_t Id;
+    bool Active = true;
+  };
+
+  bool mdGet(const std::string &Name, uint32_t &GraphId) noexcept;
+  void mdRemoveById(uint32_t GraphId) noexcept;
   Expect<WASINN::ErrNo>
-  mdBuild(std::string Name, uint32_t &GraphId, Callback Load,
-          std::vector<uint8_t> Config = std::vector<uint8_t>()) noexcept {
-    std::unique_lock Lock(MdMutex);
-    auto It = RawMdMap.find(Name);
-    if (It != RawMdMap.end()) {
-      auto RawMd = std::get<0>(It->second);
-      std::vector<Span<uint8_t>> Builders;
-      Builders.reserve(RawMd.size());
-      for (auto &Builder : RawMd) {
-        Builders.emplace_back(Builder);
-      }
-      // Add config to the end of Builders if exists.
-      if (Config.size() > 0) {
-        Builders.emplace_back(Config);
-      }
-      auto Result = Load(*this, Builders, std::get<1>(It->second),
-                         std::get<2>(It->second), GraphId);
-      if (Result.has_value()) {
-        MdMap[Name] = GraphId;
-      }
-      return Result;
+  mdBuild(const std::string &Name, uint32_t &GraphId, Callback Load,
+          std::vector<uint8_t> Config = std::vector<uint8_t>()) noexcept;
+
+  GraphGuard newGraphGuard(Backend BE) noexcept { return {*this, BE}; }
+  ContextGuard newContextGuard(uint32_t GId) noexcept { return {*this, GId}; }
+  uint32_t newReadyContext(uint32_t GId) noexcept {
+    auto Context = newContextGuard(GId);
+    return Context.commit();
+  }
+  std::unique_lock<std::shared_mutex> lockGraphOperation() const {
+    return std::unique_lock<std::shared_mutex>(OperationMutex);
+  }
+  template <typename FuncT> decltype(auto) withGraphOperation(FuncT &&Func) {
+    auto OperationLock = lockGraphOperation();
+    return std::forward<FuncT>(Func)();
+  }
+  bool hasGraph(uint32_t Id) noexcept;
+  bool isGraphReady(uint32_t Id) noexcept;
+  bool isGraphFinalized(uint32_t Id) noexcept;
+  std::optional<Backend> getGraphBackend(uint32_t Id) noexcept;
+  bool hasContext(uint32_t Id) noexcept;
+  bool isContextReady(uint32_t Id) noexcept;
+  std::optional<Backend> getContextBackend(uint32_t Id) noexcept;
+  std::optional<uint32_t> getContextGraphId(uint32_t Id) noexcept;
+  bool isContextGraphReady(uint32_t Id) noexcept;
+
+private:
+  template <Backend B>
+  detail::BackendGraphT<B> *getBackendGraphPtr(uint32_t Id) noexcept {
+    auto *GraphInst = getGraph(Id);
+    if (GraphInst == nullptr || GraphInst->getBackend() != B) {
+      return nullptr;
     }
-    return WASINN::ErrNo::NotFound;
+    return &GraphInst->template get<B>();
+  }
+  template <Backend B>
+  detail::BackendContextT<B> *getBackendContextPtr(uint32_t Id) noexcept {
+    auto *ContextInst = getContext(Id);
+    if (ContextInst == nullptr || ContextInst->getBackend() != B) {
+      return nullptr;
+    }
+    return &ContextInst->template get<B>();
+  }
+  template <Backend B>
+  detail::BackendGraphT<B> *
+  getBackendGraphFromContextPtr(uint32_t Id) noexcept {
+    auto *ContextInst = getContext(Id);
+    if (ContextInst == nullptr || ContextInst->getBackend() != B) {
+      return nullptr;
+    }
+    return getBackendGraphPtr<B>(ContextInst->getGraphId());
+  }
+  template <Backend B>
+  std::tuple<detail::BackendContextT<B> *, detail::BackendGraphT<B> *>
+  getBackendContextGraphPtr(uint32_t Id) noexcept {
+    auto *ContextInst = getBackendContextPtr<B>(Id);
+    auto *GraphInst = getBackendGraphFromContextPtr<B>(Id);
+    return {ContextInst, GraphInst};
   }
 
-  uint32_t newGraph(Backend BE) noexcept {
-    std::unique_lock Lock(GraphMutex);
-    uint32_t ID = static_cast<uint32_t>(NNGraph.size());
-    if (NNGraphRecycle.empty()) {
-      NNGraph.emplace_back(BE);
-    } else {
-      ID = *NNGraphRecycle.begin();
-      NNGraph[ID].init(BE);
-      NNGraphRecycle.erase(ID);
+public:
+  template <Backend B> struct BackendState {
+    detail::BackendContextT<B> *ContextRef;
+    detail::BackendGraphT<B> *GraphRef;
+
+    detail::BackendContextT<B> &context() const noexcept {
+      assuming(ContextRef != nullptr);
+      return *ContextRef;
     }
-    return ID;
+    detail::BackendGraphT<B> &graph() const noexcept {
+      assuming(GraphRef != nullptr);
+      return *GraphRef;
+    }
+  };
+  template <Backend B>
+  Expected<detail::BackendGraphT<B> *, ErrNo>
+  getBackendGraphOrError(uint32_t Id, std::string_view FunctionName) noexcept {
+    using namespace std::literals;
+    auto *GraphInst = getBackendGraphPtr<B>(Id);
+    if (GraphInst == nullptr) {
+      spdlog::error(
+          "[WASI-NN] {}: Graph ID {} does not exist or is not a {} graph."sv,
+          FunctionName, Id, getBackendName(B));
+      return Unexpected<ErrNo>(ErrNo::InvalidArgument);
+    }
+    return GraphInst;
+  }
+  template <Backend B>
+  Expected<detail::BackendContextT<B> *, ErrNo>
+  getBackendContextOrError(uint32_t Id,
+                           std::string_view FunctionName) noexcept {
+    using namespace std::literals;
+    auto *ContextInst = getBackendContextPtr<B>(Id);
+    if (ContextInst == nullptr) {
+      spdlog::error(
+          "[WASI-NN] {}: Context ID {} does not exist or is not a {} context."sv,
+          FunctionName, Id, getBackendName(B));
+      return Unexpected<ErrNo>(ErrNo::InvalidArgument);
+    }
+    return ContextInst;
+  }
+  template <Backend B>
+  Expected<BackendState<B>, ErrNo>
+  getBackendContextGraphOrError(uint32_t Id,
+                                std::string_view FunctionName) noexcept {
+    using namespace std::literals;
+    auto *ContextInst = getContext(Id);
+    if (ContextInst == nullptr || ContextInst->getBackend() != B) {
+      spdlog::error(
+          "[WASI-NN] {}: Context ID {} does not exist or is not a {} context."sv,
+          FunctionName, Id, getBackendName(B));
+      return Unexpected<ErrNo>(ErrNo::InvalidArgument);
+    }
+    auto GraphInst =
+        getBackendGraphOrError<B>(ContextInst->getGraphId(), FunctionName);
+    if (!GraphInst) {
+      return Unexpected<ErrNo>(GraphInst.error());
+    }
+    return BackendState<B>{&ContextInst->template get<B>(), *GraphInst};
+  }
+  template <Backend B, typename FuncT>
+  Expect<ErrNo> withBackendGraph(uint32_t Id, std::string_view FunctionName,
+                                 FuncT &&Func) noexcept {
+    auto GraphInst = getBackendGraphOrError<B>(Id, FunctionName);
+    if (!GraphInst) {
+      return GraphInst.error();
+    }
+    return std::forward<FuncT>(Func)(**GraphInst);
+  }
+  template <Backend B, typename FuncT>
+  Expect<ErrNo> withBackendContext(uint32_t Id, std::string_view FunctionName,
+                                   FuncT &&Func) noexcept {
+    auto ContextInst = getBackendContextOrError<B>(Id, FunctionName);
+    if (!ContextInst) {
+      return ContextInst.error();
+    }
+    return std::forward<FuncT>(Func)(**ContextInst);
+  }
+  template <Backend B, typename FuncT>
+  Expect<ErrNo> withBackendState(uint32_t Id, std::string_view FunctionName,
+                                 FuncT &&Func) noexcept {
+    auto State = getBackendContextGraphOrError<B>(Id, FunctionName);
+    if (!State) {
+      return State.error();
+    }
+    return std::forward<FuncT>(Func)(State->context(), State->graph());
   }
 
-  uint32_t newContext(uint32_t GId, Graph &G) noexcept {
-    std::unique_lock Lock(GraphMutex);
-    assuming(NNGraph.size() > GId);
-    // TODO: Merge GId into graph class.
-    uint32_t ID = static_cast<uint32_t>(NNContext.size());
-    if (NNContextRecycle.empty()) {
-      NNContext.emplace_back(GId, G);
-    } else {
-      ID = *NNContextRecycle.begin();
-      NNContext[ID].init(GId, G);
-      NNContextRecycle.erase(ID);
-    }
-    G.increaseContext();
-    return ID;
+private:
+  template <Backend B>
+  detail::BackendGraphT<B> &getBackendGraph(uint32_t Id) noexcept {
+    auto *GraphInst = getBackendGraphPtr<B>(Id);
+    assuming(GraphInst != nullptr);
+    return *GraphInst;
+  }
+  template <Backend B>
+  detail::BackendContextT<B> &getBackendContext(uint32_t Id) noexcept {
+    auto *ContextInst = getBackendContextPtr<B>(Id);
+    assuming(ContextInst != nullptr);
+    return *ContextInst;
+  }
+  template <Backend B>
+  detail::BackendGraphT<B> &getBackendGraphFromContext(uint32_t Id) noexcept {
+    auto *GraphInst = getBackendGraphFromContextPtr<B>(Id);
+    assuming(GraphInst != nullptr);
+    return *GraphInst;
+  }
+  template <Backend B>
+  std::tuple<detail::BackendContextT<B> &, detail::BackendGraphT<B> &>
+  getBackendContextGraph(uint32_t Id) noexcept {
+    auto [ContextInst, GraphInst] = getBackendContextGraphPtr<B>(Id);
+    assuming(ContextInst != nullptr);
+    assuming(GraphInst != nullptr);
+    return {*ContextInst, *GraphInst};
   }
 
-  void deleteGraph(const uint32_t Id) noexcept {
-    // TODO: Add the deallocation callback.
-    std::unique_lock Lock(GraphMutex);
-    if (Id < NNGraph.size()) {
-      auto &G = NNGraph[Id];
-      G.setFinalized();
-      if (G.getContextCount() == 0) {
-        // Checked all contexts are deleted. Release the graph id.
-        if (Id == NNGraph.size() - 1) {
-          NNGraph.pop_back();
-        } else {
-          G.reset();
-          NNGraphRecycle.insert(Id);
-        }
-      }
-    }
+public:
+  void setGraphReady(uint32_t Id) noexcept;
+  void setContextGraphReady(uint32_t Id) noexcept;
+  void setContextGraphInvalid(uint32_t Id) noexcept;
+  void deleteGraph(const uint32_t Id) noexcept;
+  void deleteContext(const uint32_t Id) noexcept;
+#ifdef WASMEDGE_WASI_NN_TESTING
+  void swapGraphContextForTesting(std::deque<Graph> &Graphs,
+                                  std::deque<Context> &Contexts) noexcept {
+    GraphsStore.swapGraphContextForTesting(Graphs, Contexts);
   }
+  void
+  registerPreloadModelForTesting(const std::string &Name,
+                                 std::vector<std::vector<uint8_t>> Builders,
+                                 Backend Encoding, Device Target) noexcept;
+#endif
 
-  void deleteContext(const uint32_t Id) noexcept {
-    // TODO: Add the deallocation callback.
-    std::unique_lock Lock(GraphMutex);
-    if (Id < NNContext.size() &&
-        NNContextRecycle.find(Id) == NNContextRecycle.end()) {
-      auto GId = NNContext[Id].getGraphId();
-      auto &G = NNGraph[GId];
-      G.decreaseContext();
-      if (G.getContextCount() == 0 && G.isFinalized()) {
-        // Checked all contexts are deleted. Release the graph id.
-        if (GId == NNGraph.size() - 1) {
-          NNGraph.pop_back();
-        } else {
-          G.reset();
-          NNGraphRecycle.insert(GId);
-        }
-      }
-      if (Id == NNContext.size() - 1) {
-        NNContext.pop_back();
-      } else {
-        NNContext[Id].reset();
-        NNContextRecycle.insert(Id);
-      }
-    }
-  }
+private:
+  Graph *getGraph(uint32_t Id) noexcept;
+  Context *getContext(uint32_t Id) noexcept;
+  Context *getReadyContext(uint32_t Id) noexcept;
+  void setGraphInvalid(uint32_t Id) noexcept;
 
-  // Md storage
-  mutable std::shared_mutex MdMutex;
-  std::unordered_map<std::string, std::tuple<std::vector<std::vector<uint8_t>>,
-                                             Backend, Device>>
-      RawMdMap;
-  std::unordered_map<std::string, uint32_t> MdMap;
+  std::unique_ptr<PreloadStore> Preloads;
+  GraphStore GraphsStore;
+  mutable std::shared_mutex OperationMutex;
 
-  // Graph and context
-  mutable std::shared_mutex GraphMutex;
-  std::unordered_set<uint32_t> NNGraphRecycle;
-  std::vector<Graph> NNGraph;
-  std::unordered_set<uint32_t> NNContextRecycle;
-  std::vector<Context> NNContext;
-
+public:
   // Preload model list
   static PO::List<std::string> NNModels;
 #ifdef WASMEDGE_BUILD_WASI_NN_RPC
   static PO::Option<std::string> NNRPCURI; // For RPC client mode
-  std::shared_ptr<grpc::Channel> NNRPCChannel;
+  bool hasRPCChannel() const noexcept { return NNRPCChannel != nullptr; }
+  const std::shared_ptr<grpc::Channel> &getRPCChannel() const noexcept {
+    return NNRPCChannel;
+  }
 #endif
 
   const Host::WASI::Environ *getEnv() const noexcept { return Environ; }
-  void setEnviron(const Runtime::CallingFrame *CurrentFrame) noexcept {
-    auto *WasiModule = CurrentFrame->getWASIModule();
-    if (WasiModule != nullptr) {
-      Environ = dynamic_cast<const WasmEdge::Host::WasiModule *>(WasiModule)
-                    ->getEnv();
-    }
-  }
+  void setEnviron(const Runtime::CallingFrame *CurrentFrame) noexcept;
 
 private:
+  uint32_t newGraph(Backend BE) noexcept;
+  uint32_t newContext(uint32_t GId) noexcept;
+  void setContextReady(uint32_t Id) noexcept;
+
+#ifdef WASMEDGE_BUILD_WASI_NN_RPC
+  std::shared_ptr<grpc::Channel> NNRPCChannel;
+#endif
   const Host::WASI::Environ *Environ = nullptr;
 };
 

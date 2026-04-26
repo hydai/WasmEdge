@@ -218,13 +218,13 @@ Transformer::nextStepGenerate(
   return {NextY, KVCache};
 }
 
-enum AnserSataus {
+enum AnswerStatus {
   STOP,
   WAIT,
   GO,
 };
 
-AnserSataus answerSataus(std::string Text, std::string End) {
+AnswerStatus answerStatus(std::string Text, std::string End) {
   if (endsWith(Text, End)) {
     return STOP;
   }
@@ -262,7 +262,7 @@ Transformer::generate(const std::string &Prompt, const BasePrompt &ModelPrompt,
     // TODO: break when the token is the eos_token_id
     TokenList.insert(TokenList.end(), Tokens.begin(), Tokens.end());
     Answer = Tok->Decode(TokenList);
-    const AnserSataus Status = answerSataus(Answer, ModelPrompt.TextEnd);
+    const AnswerStatus Status = answerStatus(Answer, ModelPrompt.TextEnd);
     if (Status == STOP) {
       break;
     }

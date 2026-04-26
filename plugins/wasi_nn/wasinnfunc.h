@@ -18,8 +18,8 @@ public:
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t BuilderPtr,
                         uint32_t BuilderLen, uint32_t Encoding, uint32_t Target,
                         uint32_t GraphIdPtr) {
-    return bodyImpl(Frame, BuilderPtr, BuilderLen, Encoding, Target, GraphIdPtr)
-        .map(castErrNo);
+    return runBody(Frame, &WasiNNLoad::bodyImpl, BuilderPtr, BuilderLen,
+                   Encoding, Target, GraphIdPtr);
   }
 
 private:
@@ -34,7 +34,8 @@ public:
   WasiNNLoadByName(WASINN::WasiNNEnvironment &HostEnv) : WasiNN(HostEnv) {}
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t NamePtr,
                         uint32_t NameLen, uint32_t GraphIdPtr) {
-    return bodyImpl(Frame, NamePtr, NameLen, GraphIdPtr).map(castErrNo);
+    return runBody(Frame, &WasiNNLoadByName::bodyImpl, NamePtr, NameLen,
+                   GraphIdPtr);
   }
 
 private:
@@ -50,8 +51,8 @@ public:
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t NamePtr,
                         uint32_t NameLen, uint32_t ConfigPtr,
                         uint32_t ConfigLen, uint32_t GraphIdPtr) {
-    return bodyImpl(Frame, NamePtr, NameLen, ConfigPtr, ConfigLen, GraphIdPtr)
-        .map(castErrNo);
+    return runBody(Frame, &WasiNNLoadByNameWithConfig::bodyImpl, NamePtr,
+                   NameLen, ConfigPtr, ConfigLen, GraphIdPtr);
   }
 
 private:
@@ -66,7 +67,7 @@ public:
   WasiNNInitExecCtx(WASINN::WasiNNEnvironment &HostEnv) : WasiNN(HostEnv) {}
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t GraphId,
                         uint32_t ContextPtr) {
-    return bodyImpl(Frame, GraphId, ContextPtr).map(castErrNo);
+    return runBody(Frame, &WasiNNInitExecCtx::bodyImpl, GraphId, ContextPtr);
   }
 
 private:
@@ -79,7 +80,7 @@ public:
   WasiNNSetInput(WASINN::WasiNNEnvironment &HostEnv) : WasiNN(HostEnv) {}
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t Context,
                         uint32_t Index, uint32_t TensorPtr) {
-    return bodyImpl(Frame, Context, Index, TensorPtr).map(castErrNo);
+    return runBody(Frame, &WasiNNSetInput::bodyImpl, Context, Index, TensorPtr);
   }
 
 private:
@@ -94,9 +95,8 @@ public:
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t Context,
                         uint32_t Index, uint32_t OutBufferPtr,
                         uint32_t OutBufferMaxSize, uint32_t BytesWrittenPtr) {
-    return bodyImpl(Frame, Context, Index, OutBufferPtr, OutBufferMaxSize,
-                    BytesWrittenPtr)
-        .map(castErrNo);
+    return runBody(Frame, &WasiNNGetOutput::bodyImpl, Context, Index,
+                   OutBufferPtr, OutBufferMaxSize, BytesWrittenPtr);
   }
 
 private:
@@ -113,9 +113,8 @@ public:
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t Context,
                         uint32_t Index, uint32_t OutBufferPtr,
                         uint32_t OutBufferMaxSize, uint32_t BytesWrittenPtr) {
-    return bodyImpl(Frame, Context, Index, OutBufferPtr, OutBufferMaxSize,
-                    BytesWrittenPtr)
-        .map(castErrNo);
+    return runBody(Frame, &WasiNNGetOutputSingle::bodyImpl, Context, Index,
+                   OutBufferPtr, OutBufferMaxSize, BytesWrittenPtr);
   }
 
 private:
@@ -130,7 +129,7 @@ class WasiNNCompute : public WasiNN<WasiNNCompute> {
 public:
   WasiNNCompute(WASINN::WasiNNEnvironment &HostEnv) : WasiNN(HostEnv) {}
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t Context) {
-    return bodyImpl(Frame, Context).map(castErrNo);
+    return runBody(Frame, &WasiNNCompute::bodyImpl, Context);
   }
 
 private:
@@ -142,7 +141,7 @@ class WasiNNComputeSingle : public WasiNN<WasiNNComputeSingle> {
 public:
   WasiNNComputeSingle(WASINN::WasiNNEnvironment &HostEnv) : WasiNN(HostEnv) {}
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t Context) {
-    return bodyImpl(Frame, Context).map(castErrNo);
+    return runBody(Frame, &WasiNNComputeSingle::bodyImpl, Context);
   }
 
 private:
@@ -154,7 +153,7 @@ class WasiNNFiniSingle : public WasiNN<WasiNNFiniSingle> {
 public:
   WasiNNFiniSingle(WASINN::WasiNNEnvironment &HostEnv) : WasiNN(HostEnv) {}
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t Context) {
-    return bodyImpl(Frame, Context).map(castErrNo);
+    return runBody(Frame, &WasiNNFiniSingle::bodyImpl, Context);
   }
 
 private:
@@ -166,7 +165,7 @@ class WasiNNUnload : public WasiNN<WasiNNUnload> {
 public:
   WasiNNUnload(WASINN::WasiNNEnvironment &HostEnv) : WasiNN(HostEnv) {}
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t GraphId) {
-    return bodyImpl(Frame, GraphId).map(castErrNo);
+    return runBody(Frame, &WasiNNUnload::bodyImpl, GraphId);
   }
 
 private:
@@ -178,7 +177,7 @@ class WasiNNFinalizeExecCtx : public WasiNN<WasiNNFinalizeExecCtx> {
 public:
   WasiNNFinalizeExecCtx(WASINN::WasiNNEnvironment &HostEnv) : WasiNN(HostEnv) {}
   Expect<uint32_t> body(const Runtime::CallingFrame &Frame, uint32_t Context) {
-    return bodyImpl(Frame, Context).map(castErrNo);
+    return runBody(Frame, &WasiNNFinalizeExecCtx::bodyImpl, Context);
   }
 
 private:

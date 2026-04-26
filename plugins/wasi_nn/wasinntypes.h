@@ -3,10 +3,15 @@
 
 #pragma once
 
+#include "common/errcode.h"
 #include "common/span.h"
 #include "common/spdlog.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace WasmEdge::Host::WASINN {
 
@@ -75,6 +80,137 @@ struct TensorData {
   Span<uint8_t> Tensor;
 };
 
+inline std::string_view asStringView(Span<const uint8_t> Bytes) noexcept {
+  return {reinterpret_cast<const char *>(Bytes.data()), Bytes.size()};
+}
+
+inline std::string_view asStringView(Span<uint8_t> Bytes) noexcept {
+  return {reinterpret_cast<const char *>(Bytes.data()), Bytes.size()};
+}
+
+inline std::string asString(Span<const uint8_t> Bytes) {
+  return std::string(asStringView(Bytes));
+}
+
+inline std::string asString(Span<uint8_t> Bytes) {
+  return std::string(asStringView(Bytes));
+}
+
+template <typename T>
+inline void appendObjectBytes(std::vector<uint8_t> &Output, const T &Value) {
+  const auto *Bytes = reinterpret_cast<const uint8_t *>(&Value);
+  Output.insert(Output.end(), Bytes, Bytes + sizeof(T));
+}
+
+template <typename T>
+inline void appendTypedBytes(std::vector<uint8_t> &Output, const T *Data,
+                             size_t ByteSize) {
+  const auto *Bytes = reinterpret_cast<const uint8_t *>(Data);
+  Output.insert(Output.end(), Bytes, Bytes + ByteSize);
+}
+
+std::string_view getBackendName(Backend BE) noexcept;
+
+std::string_view getBackendBuildOption(Backend BE) noexcept;
+
+inline std::string_view getDeviceName(Device Target) noexcept {
+  using namespace std::literals;
+  switch (Target) {
+  case Device::CPU:
+    return "CPU"sv;
+  case Device::GPU:
+    return "GPU"sv;
+  case Device::TPU:
+    return "TPU"sv;
+  case Device::AUTO:
+    return "AUTO"sv;
+  default:
+    return "Unknown"sv;
+  }
+}
+
+inline Expect<ErrNo>
+reportBackendNotSupported(std::string_view BackendName) noexcept {
+  using namespace std::literals;
+  spdlog::error("[WASI-NN] {} backend is not supported."sv, BackendName);
+  return ErrNo::InvalidArgument;
+}
+
+inline Expect<ErrNo> reportBackendNotSupported(Backend BE) noexcept {
+  return reportBackendNotSupported(getBackendName(BE));
+}
+
+inline Expect<ErrNo>
+reportBackendNotBuilt(std::string_view BackendName,
+                      std::string_view BuildOption) noexcept {
+  using namespace std::literals;
+  spdlog::error("[WASI-NN] {} backend is not built. use {} to build it."sv,
+                BackendName, BuildOption);
+  return ErrNo::InvalidArgument;
+}
+
+inline Expect<ErrNo> reportBackendNotBuilt(Backend BE) noexcept {
+  return reportBackendNotBuilt(getBackendName(BE), getBackendBuildOption(BE));
+}
+
+inline Expect<ErrNo> reportBackendRemoved(std::string_view BackendName,
+                                          std::string_view Reference) noexcept {
+  using namespace std::literals;
+  spdlog::error("[WASI-NN] {} backend is removed due to the upstream "
+                "end-of-life. Reference: {}"sv,
+                BackendName, Reference);
+  return ErrNo::InvalidArgument;
+}
+
+inline Expect<ErrNo> reportBackendRemoved(Backend BE,
+                                          std::string_view Reference) noexcept {
+  return reportBackendRemoved(getBackendName(BE), Reference);
+}
+
+inline ErrNo checkBuilderCount(Span<const Span<uint8_t>> Builders,
+                               size_t Expected, Backend BE) noexcept {
+  using namespace std::literals;
+  if (Builders.size() == Expected) {
+    return ErrNo::Success;
+  }
+  spdlog::error(
+      "[WASI-NN] {} backend: Wrong GraphBuilder Length {}, expect {}"sv,
+      getBackendName(BE), Builders.size(), Expected);
+  return ErrNo::InvalidArgument;
+}
+
+inline ErrNo checkDevice(Device Actual, Device Expected, Backend BE) noexcept {
+  using namespace std::literals;
+  if (Actual == Expected) {
+    return ErrNo::Success;
+  }
+  spdlog::error("[WASI-NN] {} backend only supports {} target, got {}"sv,
+                getBackendName(BE), getDeviceName(Expected),
+                getDeviceName(Actual));
+  return ErrNo::InvalidArgument;
+}
+
+inline Expected<std::string, ErrNo>
+getDeviceString(Device TargetDevice, Backend BE, bool AllowAutoAsCPU) noexcept {
+  using namespace std::literals;
+  switch (TargetDevice) {
+  case Device::AUTO:
+    if (!AllowAutoAsCPU) {
+      break;
+    }
+    [[fallthrough]];
+  case Device::CPU:
+    return "CPU"s;
+  case Device::GPU:
+    return "GPU"s;
+  default:
+    break;
+  }
+  spdlog::error("[WASI-NN] {} backend: Unsupported device type {}"sv,
+                getBackendName(BE), getDeviceName(TargetDevice));
+  return Unexpected<ErrNo>(ErrNo::InvalidArgument);
+}
+
 } // namespace WasmEdge::Host::WASINN
 
 template <>
@@ -115,21 +251,7 @@ struct fmt::formatter<WasmEdge::Host::WASINN::Device>
     : fmt::formatter<std::string_view> {
   fmt::format_context::iterator format(WasmEdge::Host::WASINN::Device Target,
                                        fmt::format_context &Ctx) const {
-    using namespace std::literals;
-    std::string_view Name;
-    switch (Target) {
-    case WasmEdge::Host::WASINN::Device::CPU:
-      Name = "CPU"sv;
-      break;
-    case WasmEdge::Host::WASINN::Device::GPU:
-      Name = "GPU"sv;
-      break;
-    case WasmEdge::Host::WASINN::Device::TPU:
-      Name = "TPU"sv;
-      break;
-    default:
-      Name = "Unknown"sv;
-    }
-    return fmt::formatter<std::string_view>::format(Name, Ctx);
+    return fmt::formatter<std::string_view>::format(
+        WasmEdge::Host::WASINN::getDeviceName(Target), Ctx);
   }
 };

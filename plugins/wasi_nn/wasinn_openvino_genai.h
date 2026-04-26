@@ -9,6 +9,7 @@
 
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_OPENVINOGENAI
 #include "openvino/openvino.hpp"
+#include <memory>
 #include <openvino/genai/llm_pipeline.hpp>
 #include <openvino/genai/visual_language/pipeline.hpp>
 #endif
@@ -31,15 +32,14 @@ public:
                                                  uint32_t Index,
                                                  Span<uint8_t> OutBuffer,
                                                  uint32_t &BytesWritten) = 0;
-  virtual ~OpenVINOGenAIBackend() noexcept {}
+  virtual ~OpenVINOGenAIBackend() noexcept = default;
 };
 
 class LLMPipelineBackend : public OpenVINOGenAIBackend {
 public:
   LLMPipelineBackend(std::string Path, std::string Device) {
-    Model = std::make_shared<ov::genai::LLMPipeline>(Path, Device);
+    Model = std::make_unique<ov::genai::LLMPipeline>(Path, Device);
   }
-  ~LLMPipelineBackend() noexcept {}
   Expect<WASINN::ErrNo> SetContextInput(Context &CxtRef, uint32_t Index,
                                         const TensorData &Tensor) override;
   Expect<WASINN::ErrNo> Generate(Context &CxtRef) override;
@@ -48,19 +48,16 @@ public:
                                          uint32_t &BytesWritten) override;
 
 private:
-  std::shared_ptr<ov::genai::LLMPipeline> Model;
+  std::unique_ptr<ov::genai::LLMPipeline> Model;
 };
 
 struct Graph {
-  ~Graph() noexcept {}
-  std::shared_ptr<OpenVINOGenAIBackend> OpenVINOGenAI;
+  std::unique_ptr<OpenVINOGenAIBackend> OpenVINOGenAI;
   Device TargetDevice = Device::AUTO;
 };
 
 struct Context {
-  Context(uint32_t GId, Graph &) noexcept : GraphId(GId) {}
-  ~Context() noexcept {}
-  uint32_t GraphId;
+  Context(uint32_t, Graph &) noexcept {}
   std::string StringInput;
   std::string StringOutput;
 
@@ -70,8 +67,6 @@ struct Context {
 };
 
 struct Environ {
-  Environ() noexcept {}
-  ~Environ() noexcept {}
   ov::Core OpenVINOCore;
 };
 #else

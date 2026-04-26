@@ -12,6 +12,7 @@
 #include <whisper.h>
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -62,8 +63,19 @@ struct Config {
   float GrammarPenalty = 100.0f;
 };
 
+struct WhisperContextDeleter {
+  void operator()(whisper_context *Ptr) const noexcept {
+    if (Ptr) {
+      whisper_free(Ptr);
+    }
+  }
+};
+
+using WhisperContextPtr =
+    std::unique_ptr<whisper_context, WhisperContextDeleter>;
+
 struct Graph {
-  whisper_context *WhisperCtx = nullptr;
+  WhisperContextPtr WhisperCtx = nullptr;
   std::string ModelFilePath;
   // Whisper config:
   Config WhisperConfig;
@@ -74,9 +86,7 @@ struct Graph {
 
 struct Context {
 public:
-  Context(uint32_t GId, Graph &G) noexcept
-      : GraphId(GId), WhisperConfig(G.WhisperConfig) {}
-  uint32_t GraphId;
+  Context(uint32_t, Graph &G) noexcept : WhisperConfig(G.WhisperConfig) {}
   // mono-channel F32 PCM input.
   std::vector<float> InputPCM;
   std::vector<std::vector<float>> InputPCMs;

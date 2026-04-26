@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2019-2024 Second State INC
 
 #include "wasinn_openvino.h"
+#include "wasinn_output.h"
 #include "wasinnenv.h"
 
 #include <algorithm>
@@ -11,32 +12,25 @@ using namespace std::literals;
 namespace WasmEdge::Host::WASINN::OpenVINO {
 #ifdef WASMEDGE_PLUGIN_WASI_NN_BACKEND_OPENVINO
 
-static Expect<WASINN::ErrNo>
-GetDeviceString(WASINN::Device TargetDevice,
-                std::string &DeviceString) noexcept {
-  switch (TargetDevice) {
-  case Device::AUTO:
-  case Device::CPU:
-    DeviceString = "CPU";
-    break;
-  case Device::GPU:
-    DeviceString = "GPU";
-    break;
-  default:
-    spdlog::error("[WASI-NN] Unsupported device type"sv);
-    return WASINN::ErrNo::InvalidArgument;
+namespace {
+
+WASINN::ErrNo
+checkModelReady(const std::shared_ptr<ov::Model> &Model) noexcept {
+  if (Model == nullptr) {
+    spdlog::error("[WASI-NN] OpenVINO backend: Model is empty."sv);
+    return WASINN::ErrNo::MissingMemory;
   }
   return WASINN::ErrNo::Success;
 }
 
+} // namespace
+
 Expect<WASINN::ErrNo> load(WASINN::WasiNNEnvironment &Env,
                            Span<const Span<uint8_t>> Builders,
                            WASINN::Device Device, uint32_t &GraphId) noexcept {
-  // The graph builder length must be 2.
-  if (Builders.size() != 2) {
-    spdlog::error("[WASI-NN] Wrong GraphBuilder Length {:d}, expect 2"sv,
-                  Builders.size());
-    return WASINN::ErrNo::InvalidArgument;
+  if (auto Res = checkBuilderCount(Builders, 2, Backend::OpenVINO);
+      Res != WASINN::ErrNo::Success) {
+    return Res;
   }
 
   // Get the XML and Weight raw buffer.
@@ -46,15 +40,14 @@ Expect<WASINN::ErrNo> load(WASINN::WasiNNEnvironment &Env,
   auto Weight = Builders[1];
 
   // Add a new graph.
-  uint32_t GId = Env.newGraph(Backend::OpenVINO);
-  auto &GraphRef = Env.NNGraph[GId].get<Graph>();
+  auto Graph = Env.newGraphGuard(Backend::OpenVINO);
+  auto &GraphRef = Graph.get<Backend::OpenVINO>();
 
   // Store device information
   GraphRef.TargetDevice = Device;
 
   try {
-    std::string ModelString(reinterpret_cast<const char *>(XML.data()),
-                            XML.size());
+    auto ModelString = asString(XML);
     GraphRef.OpenVINOIWeightTensor =
         ov::Tensor(ov::element::Type_t::u8, {Weight.size()});
     std::copy_n(Weight.data(), Weight.size(),
@@ -63,12 +56,10 @@ Expect<WASINN::ErrNo> load(WASINN::WasiNNEnvironment &Env,
         ModelString, GraphRef.OpenVINOIWeightTensor);
   } catch (const std::exception &EX) {
     spdlog::error("[WASI-NN] Model Load Exception: {}"sv, EX.what());
-    Env.deleteGraph(GId);
     return WASINN::ErrNo::RuntimeError;
   }
   // Store the loaded graph.
-  GraphId = GId;
-  Env.NNGraph[GId].setReady();
+  GraphId = Graph.commit();
   return WASINN::ErrNo::Success;
 }
 
@@ -76,26 +67,34 @@ Expect<WASINN::ErrNo> initExecCtx(WASINN::WasiNNEnvironment &Env,
                                   uint32_t GraphId,
                                   uint32_t &ContextId) noexcept {
   // Check the network and the execution network with the graph ID.
-  auto &GraphRef = Env.NNGraph[GraphId].get<Graph>();
-  if (GraphRef.OpenVINOModel == nullptr) {
-    spdlog::error("[WASI-NN] Model for Graph:{} is empty!"sv, GraphId);
-    return WASINN::ErrNo::MissingMemory;
+  auto GraphInst = Env.getBackendGraphOrError<Backend::OpenVINO>(
+      GraphId, "init_execution_context"sv);
+  if (!GraphInst) {
+    return GraphInst.error();
   }
-  // Create context.
-  ContextId = Env.newContext(GraphId, Env.NNGraph[GraphId]);
-  Env.NNContext[ContextId].setReady();
+  auto &GraphRef = **GraphInst;
+  if (auto Res = checkModelReady(GraphRef.OpenVINOModel);
+      Res != WASINN::ErrNo::Success) {
+    return Res;
+  }
+  ContextId = Env.newReadyContext(GraphId);
   return WASINN::ErrNo::Success;
 }
 
 Expect<WASINN::ErrNo> setInput(WASINN::WasiNNEnvironment &Env,
                                uint32_t ContextId, uint32_t Index,
                                const TensorData &Tensor) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
+  auto State = Env.getBackendContextGraphOrError<Backend::OpenVINO>(
+      ContextId, "set_input"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
 
-  if (GraphRef.OpenVINOModel == nullptr) {
-    spdlog::error("[WASI-NN] The founded openvino session is empty"sv);
-    return WASINN::ErrNo::MissingMemory;
+  if (auto Res = checkModelReady(GraphRef.OpenVINOModel);
+      Res != WASINN::ErrNo::Success) {
+    return Res;
   }
 
   if (Tensor.Dimension.size() > 8) {
@@ -124,14 +123,14 @@ Expect<WASINN::ErrNo> setInput(WASINN::WasiNNEnvironment &Env,
                          Tensor.Dimension.data() + Tensor.Dimension.size());
     ov::Tensor InputTensor =
         ov::Tensor(InputType, InputShape, Tensor.Tensor.data());
-    std::string Device;
-    if (!GetDeviceString(GraphRef.TargetDevice, Device)) {
-      spdlog::error("[WASI-NN] Failed to get device string for OpenVINO."sv);
-      return WASINN::ErrNo::InvalidArgument;
+    auto Device =
+        getDeviceString(GraphRef.TargetDevice, Backend::OpenVINO, true);
+    if (!Device) {
+      return Device.error();
     }
 
     ov::CompiledModel CompiledModel =
-        Env.OpenVINOCore.compile_model(GraphRef.OpenVINOModel, Device);
+        Env.OpenVINOCore.compile_model(GraphRef.OpenVINOModel, Device.value());
     CxtRef.OpenVINOInferRequest = CompiledModel.create_infer_request();
     CxtRef.OpenVINOInferRequest.set_input_tensor(Index, InputTensor);
   } catch (const std::exception &EX) {
@@ -145,8 +144,18 @@ Expect<WASINN::ErrNo> getOutput(WASINN::WasiNNEnvironment &Env,
                                 uint32_t ContextId, uint32_t Index,
                                 Span<uint8_t> OutBuffer,
                                 uint32_t &BytesWritten) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
-  auto &GraphRef = Env.NNGraph[CxtRef.GraphId].get<Graph>();
+  auto State = Env.getBackendContextGraphOrError<Backend::OpenVINO>(
+      ContextId, "get_output"sv);
+  if (!State) {
+    return State.error();
+  }
+  auto &CxtRef = State->context();
+  auto &GraphRef = State->graph();
+
+  if (auto Res = checkModelReady(GraphRef.OpenVINOModel);
+      Res != WASINN::ErrNo::Success) {
+    return Res;
+  }
 
   // Check the output index.
   if (GraphRef.OpenVINOModel->outputs().size() <= Index) {
@@ -159,9 +168,13 @@ Expect<WASINN::ErrNo> getOutput(WASINN::WasiNNEnvironment &Env,
   try {
     const ov::Tensor &OutputTensor =
         CxtRef.OpenVINOInferRequest.get_output_tensor(Index);
-    BytesWritten = OutputTensor.get_byte_size();
-    std::copy_n(static_cast<const uint8_t *>(OutputTensor.data()), BytesWritten,
-                OutBuffer.data());
+    if (auto Res = copyBytesToBuffer(
+            {static_cast<const uint8_t *>(OutputTensor.data()),
+             OutputTensor.get_byte_size()},
+            OutBuffer, BytesWritten);
+        Res != WASINN::ErrNo::Success) {
+      return Res;
+    }
   } catch (const std::exception &EX) {
     spdlog::error("[WASI-NN] Get Output Exception: {}"sv, EX.what());
     return WASINN::ErrNo::RuntimeError;
@@ -171,7 +184,12 @@ Expect<WASINN::ErrNo> getOutput(WASINN::WasiNNEnvironment &Env,
 
 Expect<WASINN::ErrNo> compute(WASINN::WasiNNEnvironment &Env,
                               uint32_t ContextId) noexcept {
-  auto &CxtRef = Env.NNContext[ContextId].get<Context>();
+  auto CxtInst =
+      Env.getBackendContextOrError<Backend::OpenVINO>(ContextId, "compute"sv);
+  if (!CxtInst) {
+    return CxtInst.error();
+  }
+  auto &CxtRef = **CxtInst;
   try {
     CxtRef.OpenVINOInferRequest.infer();
   } catch (const std::exception &EX) {
@@ -179,35 +197,6 @@ Expect<WASINN::ErrNo> compute(WASINN::WasiNNEnvironment &Env,
     return WASINN::ErrNo::RuntimeError;
   }
   return WASINN::ErrNo::Success;
-}
-#else
-namespace {
-Expect<WASINN::ErrNo> reportBackendNotSupported() noexcept {
-  spdlog::error("[WASI-NN] OpenVINO backend is not built. use "
-                "-WASMEDGE_PLUGIN_WASI_NN_BACKEND=\"OpenVINO\" to build it."sv);
-  return WASINN::ErrNo::InvalidArgument;
-}
-} // namespace
-
-Expect<WASINN::ErrNo> load(WASINN::WasiNNEnvironment &,
-                           Span<const Span<uint8_t>>, WASINN::Device,
-                           uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<WASINN::ErrNo> initExecCtx(WASINN::WasiNNEnvironment &, uint32_t,
-                                  uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<WASINN::ErrNo> setInput(WASINN::WasiNNEnvironment &, uint32_t, uint32_t,
-                               const TensorData &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<WASINN::ErrNo> getOutput(WASINN::WasiNNEnvironment &, uint32_t, uint32_t,
-                                Span<uint8_t>, uint32_t &) noexcept {
-  return reportBackendNotSupported();
-}
-Expect<WASINN::ErrNo> compute(WASINN::WasiNNEnvironment &, uint32_t) noexcept {
-  return reportBackendNotSupported();
 }
 #endif
 } // namespace WasmEdge::Host::WASINN::OpenVINO
