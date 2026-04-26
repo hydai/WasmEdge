@@ -9,10 +9,8 @@ endif()
 # WASI plug-in: WASI-Logging proposal.
 add_subdirectory(wasi_logging)
 
-# WASI plug-in: WASI-NN proposal with backends.
-if(WASMEDGE_PLUGIN_WASI_NN_BACKEND)
-  add_subdirectory(wasi_nn)
-endif()
+# WASI plug-in: WASI-NN proposal.
+add_subdirectory(wasi_nn)
 
 # WasmEdge plug-in: wasm-bpf.
 if(WASMEDGE_PLUGIN_WASM_BPF)

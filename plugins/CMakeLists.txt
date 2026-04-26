@@ -17,8 +17,8 @@ if(WASMEDGE_PLUGIN_WASI_LOGGING)
   # architecture ready in 0.15.0.
 endif()
 
-# WASI plug-in: WASI-NN proposal with backends.
-if(WASMEDGE_PLUGIN_WASI_NN_BACKEND)
+# WASI plug-in: WASI-NN proposal.
+if(WASMEDGE_PLUGIN_WASI_NN_BACKEND OR WASMEDGE_BUILD_TESTS)
   add_subdirectory(wasi_nn)
 endif()
 
