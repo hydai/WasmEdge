@@ -323,9 +323,12 @@ Expect<void> LazyJitManager::compileFunction(
       return Unexpect(AddrRes.error());
     }
     FreshAddrs = std::move(*AddrRes);
-    // add() resolves exactly one address per requested index, so the count
-    // matches by construction.
-    assuming(FreshAddrs.size() == ToCompile.size());
+    if (FreshAddrs.size() != ToCompile.size()) {
+      spdlog::error("[lazy-jit]: address count mismatch ({} vs {}), "
+                    "module ID: {}"sv,
+                    FreshAddrs.size(), ToCompile.size(), ID);
+      return Unexpect(ErrCode::Value::LazyCompilationError);
+    }
   }
 
   // The fallible work is done; from here nothing fails, so the dylib, the

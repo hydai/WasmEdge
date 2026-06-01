@@ -55,11 +55,7 @@ Executor::enterFunction(Runtime::StackManager &StackMgr,
     spdlog::error(ErrCode::Value::Interrupted);
     return Unexpect(ErrCode::Value::Interrupted);
   }
-  // Lazy JIT gate: consolidate compilation trigger for all function entry paths.
-  // This single chokepoint ensures wasm functions are compiled on-demand before
-  // execution, whether called directly, indirectly, or from compiled code.
-  EXPECTED_TRY(checkLazyCompilation(&Func));
-  auto *const CompiledCode = Func.getCompiledCodePtr();
+  EXPECTED_TRY(auto *const CompiledCode, ensureLazyCompiled(&Func));
 
   // Get the function type for the parameter and return counts.
   const auto &FuncType = Func.getFuncType();

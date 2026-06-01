@@ -103,18 +103,12 @@ public:
   Expect<void>
   onModuleRegistered(AST::Module &Module,
                      std::shared_ptr<AST::Module> PreAllocated) noexcept override {
-    if (Module.getSymbol()) {
-      return {};
-    }
     return Manager.prepare(Module, std::move(PreAllocated));
   }
 
   Expect<void>
   onModuleInstantiated(AST::Module &Module,
                        std::shared_ptr<AST::Module> PreAllocated) noexcept override {
-    if (Module.getSymbol()) {
-      return {};
-    }
     return Manager.prepare(Module, std::move(PreAllocated));
   }
 

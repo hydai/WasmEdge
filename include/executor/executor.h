@@ -1154,30 +1154,25 @@ private:
   /// compilation if needed. Returns the code pointer or nullptr (interpreted).
   Expect<void *> resolveCompiledCode(
       const Runtime::Instance::FunctionInstance *FuncInst) const noexcept {
-    if (auto *Code = FuncInst->getCompiledCodePtr()) {
-      return Code;
-    }
-    EXPECTED_TRY(checkLazyCompilation(FuncInst));
-    if (auto *Code = FuncInst->getCompiledCodePtr()) {
-      return Code;
-    }
-    return nullptr;
+    EXPECTED_TRY(auto *Code, ensureLazyCompiled(FuncInst));
+    return Code;
   }
 
-  /// Trigger lazy compilation for a wasm function that has no compiled code
-  /// yet. A wasm function only needs compilation until its code is published,
-  /// so the gate skips functions that already have compiled code and non-wasm
-  /// (host / AOT) functions. Both checks are race-free: Data is immutable
-  /// after construction and the lazily-published code pointer is read with
-  /// acquire ordering. The trigger is null for the interpreter / AOT, making
-  /// this a no-op there.
-  Expect<void> checkLazyCompilation(
+  /// Trigger lazy compilation if needed and return the compiled code pointer
+  /// (or nullptr for interpreted). Reads getCompiledCodePtr() at most twice
+  /// (before and after a real compile) instead of redundantly on every call.
+  Expect<Runtime::Instance::FunctionInstance::CompiledFunction *>
+  ensureLazyCompiled(
       const Runtime::Instance::FunctionInstance *FuncInst) const noexcept {
-    if (CompTrigger && FuncInst && FuncInst->isWasmFunction() &&
-        !FuncInst->getCompiledCodePtr()) {
-      return CompTrigger->ensureCompiled(*FuncInst);
+    auto *Code = FuncInst->getCompiledCodePtr();
+    if (Code) {
+      return Code;
     }
-    return {};
+    if (CompTrigger && FuncInst->isWasmFunction()) {
+      EXPECTED_TRY(CompTrigger->ensureCompiled(*FuncInst));
+      return FuncInst->getCompiledCodePtr();
+    }
+    return nullptr;
   }
 };
 
