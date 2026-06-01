@@ -771,11 +771,11 @@ Expect<void> VM::ensureCompiled(
     return {};
   }
   // SAFETY: ModInst is VM-owned storage (ActiveModInst or RegModInsts). Reading
-  // it here is safe only when a shared lock on VM::Mutex is held, which excludes
-  // the unique-lock unregister/instantiate/cleanup paths that could destroy the
-  // instance. All VM public execute methods (execute, asyncExecute,
-  // executeComponent) hold VM::Mutex in shared mode for their entire duration,
-  // including the executor callbacks that reach this function.
+  // it here is safe only when a lock on VM::Mutex is held, which excludes
+  // concurrent unregister/cleanup paths that could destroy the instance. All VM
+  // public execute methods (execute, asyncExecute, executeComponent) hold
+  // VM::Mutex in shared mode; instantiate/runWasmFile hold it in unique mode
+  // (the start function may trigger lazy compilation via this path).
   //
   // WARNING: callers who obtain the executor via getExecutor() or the C API
   // WasmEdge_VMGetExecutorContext and invoke it directly MUST NOT do so

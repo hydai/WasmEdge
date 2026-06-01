@@ -1150,14 +1150,6 @@ private:
   /// Trigger for lazy function compilation (null unless lazy JIT is active).
   CompilationTrigger *CompTrigger = nullptr;
 
-  /// Resolve the compiled code pointer for a FunctionInstance, triggering lazy
-  /// compilation if needed. Returns the code pointer or nullptr (interpreted).
-  Expect<void *> resolveCompiledCode(
-      const Runtime::Instance::FunctionInstance *FuncInst) const noexcept {
-    EXPECTED_TRY(auto *Code, ensureLazyCompiled(FuncInst));
-    return Code;
-  }
-
   /// Trigger lazy compilation if needed and return the compiled code pointer
   /// (or nullptr for interpreted). Reads getCompiledCodePtr() at most twice
   /// (before and after a real compile) instead of redundantly on every call.

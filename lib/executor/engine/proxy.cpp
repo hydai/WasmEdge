@@ -648,14 +648,14 @@ Expect<void *> Executor::proxyTableGetFuncSymbol(
     return Unexpect(ErrCode::Value::IndirectCallTypeMismatch);
   }
 
-  return resolveCompiledCode(FuncInst);
+  return ensureLazyCompiled(FuncInst);
 }
 
 Expect<void *> Executor::proxyRefGetFuncSymbol(Runtime::StackManager &,
                                                const RefVariant Ref) noexcept {
   const auto *FuncInst = retrieveFuncRef(Ref);
   assuming(FuncInst);
-  return resolveCompiledCode(FuncInst);
+  return ensureLazyCompiled(FuncInst);
 }
 
 Expect<void *>
@@ -663,7 +663,7 @@ Executor::proxyFuncGetFuncSymbol(Runtime::StackManager &StackMgr,
                                  const uint32_t FuncIdx) noexcept {
   const auto *FuncInst = getFuncInstByIdx(StackMgr, FuncIdx);
   assuming(FuncInst);
-  return resolveCompiledCode(FuncInst);
+  return ensureLazyCompiled(FuncInst);
 }
 
 } // namespace Executor

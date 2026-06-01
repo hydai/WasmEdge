@@ -260,9 +260,7 @@ Expect<void> LazyJitManager::compileFunction(
   std::vector<LLVM::WasmFunctionCodeAddress> ExistingAddrs;
   if (!ExistingGlobals.empty()) {
     auto LkRes = JITEngine.lookupWasmFunctionSymbols(
-        JITLib, LLDataPtr->getPrefix(),
-        WasmEdge::Span<const uint32_t>(ExistingGlobals.data(),
-                                       ExistingGlobals.size()));
+        JITLib, LLDataPtr->getPrefix(), ExistingGlobals);
     if (!LkRes || LkRes->size() != ExistingGlobals.size()) {
       spdlog::error("[lazy-jit]: failed to resolve already-compiled functions, "
                     "module ID: {}"sv,
@@ -292,8 +290,7 @@ Expect<void> LazyJitManager::compileFunction(
     if (auto CompileResult = BatchCompiler.compileFunctions(
             *LLDataPtr,
             static_cast<LLVM::Compiler::CompileContext *>(LLContextPtr->get()),
-            Module,
-            WasmEdge::Span<const uint32_t>(ToCompile.data(), ToCompile.size()));
+            Module, ToCompile);
         !CompileResult) {
       spdlog::error("[lazy-jit]: Lazy JIT function compilation failed: {}, "
                     "module ID: {}"sv,
@@ -313,10 +310,7 @@ Expect<void> LazyJitManager::compileFunction(
       return Unexpect(ErrCode::Value::LazyCompilationError);
     }
 
-    auto AddrRes = JITEngine.add(
-        JITLib, *LLDataPtr,
-        WasmEdge::Span<const uint32_t>(ToCompileGlobals.data(),
-                                       ToCompileGlobals.size()));
+    auto AddrRes = JITEngine.add(JITLib, *LLDataPtr, ToCompileGlobals);
     if (!AddrRes) {
       spdlog::error("[lazy-jit]: Lazy JIT add failed: {}, module ID: {}"sv,
                     AddrRes.error(), ID);
@@ -339,7 +333,7 @@ Expect<void> LazyJitManager::compileFunction(
   // it.
   auto Wire = [&JITLib](Runtime::Instance::FunctionInstance *Inst,
                         LLVM::WasmFunctionCodeAddress Addr) {
-    if (Inst->isWasmFunction() && !Inst->getCompiledCodePtr()) {
+    if (Inst->isWasmFunction()) {
       Inst->unsafeUpgradeToCompiled(JITLib.createSymbol(
           reinterpret_cast<Runtime::Instance::FunctionInstance::CompiledFunction
                                *>(Addr)));
