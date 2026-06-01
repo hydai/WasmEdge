@@ -330,6 +330,15 @@ private:
     return Strategy->compiledFuncCount();
   }
 
+  /// Notify the strategy that a module ID has no live instances left, so
+  /// per-module state (lazy-JIT dylib, AST copy) can be discarded. Skips
+  /// empty IDs (untrackable) and IDs that still have a live instance.
+  void discardOrphanedModuleState(std::string_view ID) noexcept {
+    if (!ID.empty() && !hasLiveInstanceWithID(ID)) {
+      Strategy->onModuleOrphaned(ID);
+    }
+  }
+
   void cleanupModInstContainer(
       std::vector<std::unique_ptr<Runtime::Instance::ModuleInstance>>
           &Container) {

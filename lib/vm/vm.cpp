@@ -232,12 +232,7 @@ Expect<void> VM::unsafeRegisterModule(std::string_view Name,
   // Instantiate and register module.
   auto RegResult = ExecutorEngine.registerModule(StoreRef, Module, Name);
   if (!RegResult) {
-    // prepare() is idempotent for an already-tracked ID, so a failed
-    // registration that reused a live sibling's ID added no state of its own;
-    // discard only when no live instance still depends on it.
-    if (!hasLiveInstanceWithID(ID)) {
-      Strategy->onModuleRegistrationFailed(ID);
-    }
+    discardOrphanedModuleState(ID);
     return Unexpect(RegResult.error());
   }
   RegModInsts.push_back(std::move(*RegResult));
@@ -284,11 +279,7 @@ Expect<void> VM::unsafeUnregisterModule(std::string_view Name) {
     if (ModInst) {
       ModInst->terminate();
     }
-    // Drop the module's lazy-JIT state, unless another live instance (active or
-    // registered) still shares this ID.
-    if (!hasLiveInstanceWithID(ModId)) {
-      Strategy->onModuleUnregistered(ModId);
-    }
+    discardOrphanedModuleState(ModId);
     return {};
   }
   for (auto It = BuiltInModInsts.begin(); It != BuiltInModInsts.end(); ++It) {
@@ -397,15 +388,11 @@ VM::unsafeRunWasmFile(AST::Module &Module, std::string_view Func,
   EXPECTED_TRY(Strategy->onModuleInstantiated(Module));
   auto InstResult = ExecutorEngine.instantiateModule(StoreRef, Module);
   if (!InstResult) {
-    if (!NewModID.empty() && !hasLiveInstanceWithID(NewModID)) {
-      Strategy->onModuleInstantiationFailed(NewModID);
-    }
+    discardOrphanedModuleState(NewModID);
     return Unexpect(InstResult.error());
   }
   ActiveModInst = std::move(*InstResult);
-  if (!OldModID.empty() && !hasLiveInstanceWithID(OldModID)) {
-    Strategy->onModuleUnregistered(OldModID);
-  }
+  discardOrphanedModuleState(OldModID);
 
   // Get module instance.
   if (ActiveModInst) {
@@ -540,15 +527,11 @@ Expect<void> VM::unsafeInstantiate() {
 
     auto InstResult = ExecutorEngine.instantiateModule(StoreRef, *Mod);
     if (!InstResult) {
-      if (!NewModID.empty() && !hasLiveInstanceWithID(NewModID)) {
-        Strategy->onModuleInstantiationFailed(NewModID);
-      }
+      discardOrphanedModuleState(NewModID);
       return Unexpect(InstResult.error());
     }
     ActiveModInst = std::move(*InstResult);
-    if (!OldModID.empty() && !hasLiveInstanceWithID(OldModID)) {
-      Strategy->onModuleUnregistered(OldModID);
-    }
+    discardOrphanedModuleState(OldModID);
 
     Stage = VMStage::Instantiated;
     return {};

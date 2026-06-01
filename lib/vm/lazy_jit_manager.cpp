@@ -141,9 +141,6 @@ Expect<void> LazyJitManager::prepare(AST::Module &Module) noexcept {
   Tracked.ASTModule = std::make_shared<const AST::Module>(Module);
 
   std::unique_lock Lock(Mutex);
-  // Re-check under the exclusive lock: another thread may have prepared this ID
-  // while we compiled. try_emplace keeps the existing dylib (a sibling instance
-  // may already rely on it) and inserts ours only when the ID is still absent.
   States.try_emplace(std::string(Module.getID()), std::move(Tracked));
   return {};
 }

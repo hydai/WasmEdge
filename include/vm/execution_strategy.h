@@ -51,21 +51,11 @@ public:
     return {};
   }
 
-  /// Hook run when registration fails after onModuleRegistered, so any state
-  /// prepared for the module can be discarded.
-  virtual void onModuleRegistrationFailed(std::string_view ID) noexcept {
-    (void)ID;
-  }
-
-  /// Hook run when instantiation fails after onModuleInstantiated, so any state
-  /// prepared for the module can be discarded.
-  virtual void onModuleInstantiationFailed(std::string_view ID) noexcept {
-    (void)ID;
-  }
-
-  /// Hook run when a registered module is unregistered and no other live
-  /// instance shares its ID, so per-module state for that ID can be dropped.
-  virtual void onModuleUnregistered(std::string_view ID) noexcept { (void)ID; }
+  /// Hook run when no live instance remains for a given module ID — the module
+  /// was unregistered, or registration/instantiation failed after prepare().
+  /// The VM guarantees this is called only when hasLiveInstanceWithID is false
+  /// and the ID is non-empty, so strategies can unconditionally discard state.
+  virtual void onModuleOrphaned(std::string_view ID) noexcept { (void)ID; }
 
   /// Lazily compile a function before it executes (lazy mode only). The owning
   /// module instance identifies which per-module state to compile against; the

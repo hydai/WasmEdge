@@ -650,27 +650,14 @@ Expect<void *> Executor::proxyTableGetFuncSymbol(
     return Unexpect(ErrCode::Value::IndirectCallTypeMismatch);
   }
 
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
-
-  if (auto *Code = FuncInst->getCompiledCodePtr()) {
-    return Code;
-  }
-  return nullptr;
+  return resolveCompiledCode(FuncInst);
 }
 
 Expect<void *> Executor::proxyRefGetFuncSymbol(Runtime::StackManager &,
                                                const RefVariant Ref) noexcept {
   const auto *FuncInst = retrieveFuncRef(Ref);
   assuming(FuncInst);
-  if (auto *Code = FuncInst->getCompiledCodePtr()) {
-    return Code;
-  }
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
-
-  if (auto *Code = FuncInst->getCompiledCodePtr()) {
-    return Code;
-  }
-  return nullptr;
+  return resolveCompiledCode(FuncInst);
 }
 
 Expect<void *>
@@ -678,15 +665,7 @@ Executor::proxyFuncGetFuncSymbol(Runtime::StackManager &StackMgr,
                                  const uint32_t FuncIdx) noexcept {
   const auto *FuncInst = getFuncInstByIdx(StackMgr, FuncIdx);
   assuming(FuncInst);
-  if (auto *Code = FuncInst->getCompiledCodePtr()) {
-    return Code;
-  }
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
-
-  if (auto *Code = FuncInst->getCompiledCodePtr()) {
-    return Code;
-  }
-  return nullptr;
+  return resolveCompiledCode(FuncInst);
 }
 
 } // namespace Executor

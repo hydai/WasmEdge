@@ -100,15 +100,7 @@ public:
     return Manager.prepare(Module);
   }
 
-  void onModuleRegistrationFailed(std::string_view ID) noexcept override {
-    Manager.discardState(ID);
-  }
-
-  void onModuleInstantiationFailed(std::string_view ID) noexcept override {
-    Manager.discardState(ID);
-  }
-
-  void onModuleUnregistered(std::string_view ID) noexcept override {
+  void onModuleOrphaned(std::string_view ID) noexcept override {
     Manager.discardState(ID);
   }
 
