@@ -236,7 +236,7 @@ Validator::validate(const AST::Component::Component &Comp) noexcept {
   spdlog::warn("Component Model Validation is in active development."sv);
   CompCtx.reset();
   return validateComponent(Comp).and_then([&]() {
-    const_cast<AST::Component::Component &>(Comp).setIsValidated();
+    Comp.setIsValidated();
     return Expect<void>{};
   });
 }
@@ -276,7 +276,7 @@ Validator::validate(const AST::Component::CoreModuleSection &ModSec) noexcept {
     spdlog::error(ErrInfo::InfoAST(ASTNodeAttr::Comp_Sec_CoreMod));
     return E;
   }));
-  const_cast<AST::Module &>(ModSec.getContent()).setIsValidated();
+  ModSec.getContent().setIsValidated();
   CompCtx.addCoreModule(ModSec.getContent());
   return {};
 }

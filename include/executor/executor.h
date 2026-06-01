@@ -1150,12 +1150,27 @@ private:
   /// Trigger for lazy function compilation (null unless lazy JIT is active).
   CompilationTrigger *CompTrigger = nullptr;
 
-  /// Helper function for triggering lazy compilation. A wasm function only
-  /// needs compilation until its code is published, so the gate skips functions
-  /// that already have compiled code and non-wasm (host / AOT) functions. Both
-  /// checks are race-free: Data is immutable after construction and the
-  /// lazily-published code pointer is read with acquire ordering. The trigger
-  /// is null for the interpreter / AOT, making this a no-op there.
+  /// Resolve the compiled code pointer for a FunctionInstance, triggering lazy
+  /// compilation if needed. Returns the code pointer or nullptr (interpreted).
+  Expect<void *> resolveCompiledCode(
+      const Runtime::Instance::FunctionInstance *FuncInst) const noexcept {
+    if (auto *Code = FuncInst->getCompiledCodePtr()) {
+      return Code;
+    }
+    EXPECTED_TRY(checkLazyCompilation(FuncInst));
+    if (auto *Code = FuncInst->getCompiledCodePtr()) {
+      return Code;
+    }
+    return nullptr;
+  }
+
+  /// Trigger lazy compilation for a wasm function that has no compiled code
+  /// yet. A wasm function only needs compilation until its code is published,
+  /// so the gate skips functions that already have compiled code and non-wasm
+  /// (host / AOT) functions. Both checks are race-free: Data is immutable
+  /// after construction and the lazily-published code pointer is read with
+  /// acquire ordering. The trigger is null for the interpreter / AOT, making
+  /// this a no-op there.
   Expect<void> checkLazyCompilation(
       const Runtime::Instance::FunctionInstance *FuncInst) const noexcept {
     if (CompTrigger && FuncInst && FuncInst->isWasmFunction() &&

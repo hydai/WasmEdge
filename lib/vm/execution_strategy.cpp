@@ -104,6 +104,10 @@ public:
     Manager.discardState(ID);
   }
 
+  void onModuleInstantiationFailed(std::string_view ID) noexcept override {
+    Manager.discardState(ID);
+  }
+
   void onModuleUnregistered(std::string_view ID) noexcept override {
     Manager.discardState(ID);
   }

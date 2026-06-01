@@ -388,10 +388,24 @@ VM::unsafeRunWasmFile(AST::Module &Module, std::string_view Func,
     // be reset. Therefore the instantiation should restart.
     Stage = VMStage::Validated;
   }
+  std::string OldModID;
+  if (ActiveModInst) {
+    OldModID = std::string(ActiveModInst->getID());
+  }
   EXPECTED_TRY(ValidatorEngine.validate(Module));
+  std::string NewModID(Module.getID());
   EXPECTED_TRY(Strategy->onModuleInstantiated(Module));
-  EXPECTED_TRY(ActiveModInst,
-               ExecutorEngine.instantiateModule(StoreRef, Module));
+  auto InstResult = ExecutorEngine.instantiateModule(StoreRef, Module);
+  if (!InstResult) {
+    if (!NewModID.empty() && !hasLiveInstanceWithID(NewModID)) {
+      Strategy->onModuleInstantiationFailed(NewModID);
+    }
+    return Unexpect(InstResult.error());
+  }
+  ActiveModInst = std::move(*InstResult);
+  if (!OldModID.empty() && !hasLiveInstanceWithID(OldModID)) {
+    Strategy->onModuleUnregistered(OldModID);
+  }
 
   // Get module instance.
   if (ActiveModInst) {
@@ -517,10 +531,24 @@ Expect<void> VM::unsafeInstantiate() {
     return Unexpect(ErrCode::Value::WrongVMWorkflow);
   }
   if (Mod) {
+    std::string OldModID;
+    if (ActiveModInst) {
+      OldModID = std::string(ActiveModInst->getID());
+    }
+    std::string NewModID(Mod->getID());
     EXPECTED_TRY(Strategy->onModuleInstantiated(*Mod));
 
-    EXPECTED_TRY(ActiveModInst,
-                 ExecutorEngine.instantiateModule(StoreRef, *Mod));
+    auto InstResult = ExecutorEngine.instantiateModule(StoreRef, *Mod);
+    if (!InstResult) {
+      if (!NewModID.empty() && !hasLiveInstanceWithID(NewModID)) {
+        Strategy->onModuleInstantiationFailed(NewModID);
+      }
+      return Unexpect(InstResult.error());
+    }
+    ActiveModInst = std::move(*InstResult);
+    if (!OldModID.empty() && !hasLiveInstanceWithID(OldModID)) {
+      Strategy->onModuleUnregistered(OldModID);
+    }
 
     Stage = VMStage::Instantiated;
     return {};

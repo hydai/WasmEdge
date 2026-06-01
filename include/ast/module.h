@@ -86,9 +86,11 @@ public:
     IntrSymbol = std::move(S);
   }
 
-  /// Getter and setter for validated flag.
+  /// Getter and setter for validated flag. IsValidated is mutable because it is
+  /// observation metadata (not part of the module's logical content), and the
+  /// validator takes const AST::Module& but needs to mark it validated.
   bool getIsValidated() const noexcept { return IsValidated; }
-  void setIsValidated(bool V = true) noexcept { IsValidated = V; }
+  void setIsValidated(bool V = true) const noexcept { IsValidated = V; }
 
   /// Getter and setter of ID.
   const std::string &getID() const noexcept { return ID; }
@@ -127,7 +129,7 @@ private:
 
   /// \name Validated flag.
   /// @{
-  bool IsValidated = false;
+  mutable bool IsValidated = false;
   /// @}
 
   /// \name ID.

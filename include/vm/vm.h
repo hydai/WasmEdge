@@ -76,8 +76,12 @@ public:
   Expect<void> registerModule(std::string_view Name,
                               const AST::Module &Module) {
     std::unique_lock Lock(Mutex);
-    AST::Module ModCopy(Module);
-    return unsafeRegisterModule(Name, ModCopy);
+    if (Strategy->needsModuleCopy()) {
+      AST::Module ModCopy(Module);
+      return unsafeRegisterModule(Name, ModCopy);
+    }
+    return unsafeRegisterModule(Name,
+                                const_cast<AST::Module &>(Module)); // NOLINT
   }
   Expect<void>
   registerModule(const Runtime::Instance::ModuleInstance &ModInst) {
@@ -123,8 +127,12 @@ public:
               Span<const ValVariant> Params = {},
               Span<const ValType> ParamTypes = {}) {
     std::unique_lock Lock(Mutex);
-    AST::Module ModCopy(Module);
-    return unsafeRunWasmFile(ModCopy, Func, Params, ParamTypes);
+    if (Strategy->needsModuleCopy()) {
+      AST::Module ModCopy(Module);
+      return unsafeRunWasmFile(ModCopy, Func, Params, ParamTypes);
+    }
+    return unsafeRunWasmFile(const_cast<AST::Module &>(Module), // NOLINT
+                             Func, Params, ParamTypes);
   }
 
   Async<Expect<std::vector<std::pair<ValVariant, ValType>>>>
@@ -313,10 +321,15 @@ public:
   Statistics::Statistics &getStatistics() noexcept { return Stat; }
 
   uint32_t getLazyCompiledFuncCount() const noexcept {
-    return Strategy->compiledFuncCount();
+    std::shared_lock Lock(Mutex);
+    return unsafeGetLazyCompiledFuncCount();
   }
 
 private:
+  uint32_t unsafeGetLazyCompiledFuncCount() const noexcept {
+    return Strategy->compiledFuncCount();
+  }
+
   void cleanupModInstContainer(
       std::vector<std::unique_ptr<Runtime::Instance::ModuleInstance>>
           &Container) {

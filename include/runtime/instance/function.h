@@ -80,7 +80,11 @@ public:
         Data(std::in_place_type_t<std::unique_ptr<HostFunctionBase>>(),
              std::move(Func)) {}
 
-  /// Check whether this is a native wasm function.
+  /// Check whether this is a native wasm function (not a host function). In
+  /// lazy-JIT mode, a wasm function may also have compiled code
+  /// (getCompiledCodePtr() != nullptr) published via unsafeUpgradeToCompiled;
+  /// this accessor returns true regardless of compilation status. For
+  /// compiled-vs-interpreted distinction, check getCompiledCodePtr() separately.
   bool isWasmFunction() const noexcept {
     return std::holds_alternative<WasmFunction>(Data);
   }

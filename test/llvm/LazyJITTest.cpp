@@ -417,6 +417,36 @@ TEST_F(LazyJITTest, LazyJITReinstantiateSameVM) {
   VM->cleanup();
 }
 
+TEST_F(LazyJITTest, LazyJITReinstantiateUncompiledFunctionStillWorks) {
+  auto VM = createLazyJITVM();
+  ASSERT_TRUE(VM->loadWasm(SimpleWasm));
+  ASSERT_TRUE(VM->validate());
+
+  std::vector<ValType> Types = {ValType(TypeCode::I32), ValType(TypeCode::I32)};
+  std::vector<ValVariant> Params = {3U, 4U};
+
+  ASSERT_TRUE(VM->instantiate());
+  auto R1 = VM->execute("add", Params, Types);
+  ASSERT_TRUE(R1);
+  EXPECT_EQ((*R1)[0].first.get<uint32_t>(), 7U);
+
+  ASSERT_TRUE(VM->instantiate());
+
+  auto R2 = VM->execute("sub", Params, Types);
+  ASSERT_TRUE(R2);
+  EXPECT_EQ((*R2)[0].first.get<uint32_t>(), static_cast<uint32_t>(-1));
+
+  auto R3 = VM->execute("mul", Params, Types);
+  ASSERT_TRUE(R3);
+  EXPECT_EQ((*R3)[0].first.get<uint32_t>(), 12U);
+
+  auto R4 = VM->execute("add", Params, Types);
+  ASSERT_TRUE(R4);
+  EXPECT_EQ((*R4)[0].first.get<uint32_t>(), 7U);
+
+  VM->cleanup();
+}
+
 TEST_F(LazyJITTest, LazyJITOnlySomeFunctionsCalled) {
   auto VM = createLazyJITVM();
 
@@ -1391,6 +1421,56 @@ TEST_F(LazyJITTest, EagerJITRunWasmFileCompilesModule) {
   const auto *AddFunc = ActiveMod->findFuncExports("add");
   ASSERT_NE(AddFunc, nullptr);
   EXPECT_NE(AddFunc->getCompiledCodePtr(), nullptr);
+
+  VM->cleanup();
+}
+
+TEST_F(LazyJITTest, LazyJITFailedInstantiationCleansUpState) {
+  auto VM = createLazyJITVM();
+
+  // ImportWasm requires "env"/"host_add" — instantiation will fail when the
+  // host module is not registered, triggering the failure-cleanup path.
+  ASSERT_TRUE(VM->loadWasm(ImportWasm));
+  ASSERT_TRUE(VM->validate());
+  ASSERT_FALSE(VM->instantiate());
+
+  EXPECT_EQ(VM->getLazyCompiledFuncCount(), 0U);
+
+  // Now load a self-contained module. If the failed instantiation leaked state,
+  // this would either collide with the stale entry or leave the manager in an
+  // inconsistent state.
+  ASSERT_TRUE(VM->loadWasm(SimpleWasm));
+  ASSERT_TRUE(VM->validate());
+  ASSERT_TRUE(VM->instantiate());
+
+  std::vector<ValType> Types = {ValType(TypeCode::I32), ValType(TypeCode::I32)};
+  std::vector<ValVariant> Params = {3U, 4U};
+  auto R = VM->execute("add", Params, Types);
+  ASSERT_TRUE(R);
+  EXPECT_EQ((*R)[0].first.get<uint32_t>(), 7U);
+  EXPECT_GT(VM->getLazyCompiledFuncCount(), 0U);
+
+  VM->cleanup();
+}
+
+TEST_F(LazyJITTest, LazyJITFailedRunWasmFileCleansUpState) {
+  auto VM = createLazyJITVM();
+
+  // runWasmFile with ImportWasm will fail at instantiation (missing host
+  // module), exercising the unsafeRunWasmFile failure-cleanup path.
+  std::vector<ValType> Types = {ValType(TypeCode::I32), ValType(TypeCode::I32)};
+  std::vector<ValVariant> Params = {3U, 7U};
+  auto R1 = VM->runWasmFile(ImportWasm, "call_host", Params, Types);
+  ASSERT_FALSE(R1);
+
+  EXPECT_EQ(VM->getLazyCompiledFuncCount(), 0U);
+
+  // A subsequent runWasmFile with a self-contained module must succeed and
+  // compile on demand, proving the failed run's state was cleaned up.
+  auto R2 = VM->runWasmFile(SimpleWasm, "add", Params, Types);
+  ASSERT_TRUE(R2);
+  EXPECT_EQ((*R2)[0].first.get<uint32_t>(), 10U);
+  EXPECT_GT(VM->getLazyCompiledFuncCount(), 0U);
 
   VM->cleanup();
 }

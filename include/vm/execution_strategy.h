@@ -57,6 +57,12 @@ public:
     (void)ID;
   }
 
+  /// Hook run when instantiation fails after onModuleInstantiated, so any state
+  /// prepared for the module can be discarded.
+  virtual void onModuleInstantiationFailed(std::string_view ID) noexcept {
+    (void)ID;
+  }
+
   /// Hook run when a registered module is unregistered and no other live
   /// instance shares its ID, so per-module state for that ID can be dropped.
   virtual void onModuleUnregistered(std::string_view ID) noexcept { (void)ID; }
