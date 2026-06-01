@@ -69,6 +69,10 @@ public:
     std::unique_lock Lock(Mutex);
     return unsafeRegisterModule(Name, Code);
   }
+  /// Register a module by mutable reference (zero-copy). In JIT/lazy-JIT mode
+  /// the module is mutated in place (compiled symbols are embedded via
+  /// loadExecutable). Use the const overload to leave the caller's module
+  /// untouched.
   Expect<void> registerModule(std::string_view Name, AST::Module &Module) {
     std::unique_lock Lock(Mutex);
     return unsafeRegisterModule(Name, Module);
@@ -77,8 +81,8 @@ public:
                               const AST::Module &Module) {
     std::unique_lock Lock(Mutex);
     if (Strategy->needsModuleCopy()) {
-      AST::Module ModCopy(Module);
-      return unsafeRegisterModule(Name, ModCopy);
+      auto ModPtr = std::make_shared<AST::Module>(Module);
+      return unsafeRegisterModule(Name, *ModPtr, std::move(ModPtr));
     }
     return unsafeRegisterModule(Name,
                                 const_cast<AST::Module &>(Module)); // NOLINT
@@ -115,6 +119,10 @@ public:
     std::unique_lock Lock(Mutex);
     return unsafeRunWasmFile(Code, Func, Params, ParamTypes);
   }
+  /// Run a wasm function from a module by mutable reference (zero-copy). In
+  /// JIT/lazy-JIT mode the module is mutated in place (compiled symbols are
+  /// embedded via loadExecutable). Use the const overload to leave the caller's
+  /// module untouched.
   Expect<std::vector<std::pair<ValVariant, ValType>>>
   runWasmFile(AST::Module &Module, std::string_view Func,
               Span<const ValVariant> Params = {},
@@ -128,8 +136,9 @@ public:
               Span<const ValType> ParamTypes = {}) {
     std::unique_lock Lock(Mutex);
     if (Strategy->needsModuleCopy()) {
-      AST::Module ModCopy(Module);
-      return unsafeRunWasmFile(ModCopy, Func, Params, ParamTypes);
+      auto ModPtr = std::make_shared<AST::Module>(Module);
+      return unsafeRunWasmFile(*ModPtr, Func, Params, ParamTypes,
+                               std::move(ModPtr));
     }
     return unsafeRunWasmFile(const_cast<AST::Module &>(Module), // NOLINT
                              Func, Params, ParamTypes);
@@ -315,6 +324,13 @@ public:
   Validator::Validator &getValidator() noexcept { return ValidatorEngine; }
 
   /// Getter for the executor in the VM.
+  ///
+  /// Thread safety: in lazy-JIT mode the returned executor's compiled-code
+  /// callbacks reach back into this VM (ensureCompiled) and read VM-owned
+  /// module instances.  The caller must not invoke the executor concurrently
+  /// with module mutation (registerModule, unregisterModule, instantiate,
+  /// cleanup) on another thread; those operations take a unique lock that
+  /// would race the executor's shared-lock reads.
   Executor::Executor &getExecutor() noexcept { return ExecutorEngine; }
 
   /// Getter for statistics.
@@ -378,8 +394,9 @@ private:
                                     const std::filesystem::path &Path);
   Expect<void> unsafeRegisterModule(std::string_view Name,
                                     Span<const Byte> Code);
-  Expect<void> unsafeRegisterModule(std::string_view Name,
-                                    AST::Module &Module);
+  Expect<void>
+  unsafeRegisterModule(std::string_view Name, AST::Module &Module,
+                       std::shared_ptr<AST::Module> PreAllocated = nullptr);
   Expect<void>
   unsafeRegisterModule(std::string_view Name,
                        const Runtime::Instance::ModuleInstance &ModInst);
@@ -397,7 +414,8 @@ private:
   Expect<std::vector<std::pair<ValVariant, ValType>>>
   unsafeRunWasmFile(AST::Module &Module, std::string_view Func,
                     Span<const ValVariant> Params = {},
-                    Span<const ValType> ParamTypes = {});
+                    Span<const ValType> ParamTypes = {},
+                    std::shared_ptr<AST::Module> PreAllocated = nullptr);
   Expect<std::vector<std::pair<ValVariant, ValType>>>
   unsafeRunWasmFile(const AST::Component::Component &Component,
                     std::string_view Func, Span<const ValVariant> Params = {},

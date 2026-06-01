@@ -39,15 +39,23 @@ class ExecutionStrategy {
 public:
   virtual ~ExecutionStrategy() = default;
 
-  /// Hook run when a module is registered.
-  virtual Expect<void> onModuleRegistered(AST::Module &Module) noexcept {
+  /// Hook run when a module is registered. \p PreAllocated, when non-null, is a
+  /// heap-allocated copy the caller already made; strategies that store the
+  /// module can adopt it to avoid a second deep copy.
+  virtual Expect<void>
+  onModuleRegistered(AST::Module &Module,
+                     std::shared_ptr<AST::Module> PreAllocated = nullptr) noexcept {
     (void)Module;
+    (void)PreAllocated;
     return {};
   }
 
   /// Hook run when a module is instantiated (also covers re-instantiation).
-  virtual Expect<void> onModuleInstantiated(AST::Module &Module) noexcept {
+  virtual Expect<void>
+  onModuleInstantiated(AST::Module &Module,
+                       std::shared_ptr<AST::Module> PreAllocated = nullptr) noexcept {
     (void)Module;
+    (void)PreAllocated;
     return {};
   }
 
@@ -73,6 +81,8 @@ public:
 
   /// Number of lazily-compiled functions (lazy mode only).
   virtual uint32_t compiledFuncCount() const noexcept { return 0; }
+
+  virtual bool needsModuleCopy() const noexcept { return false; }
 
   /// Whether the executor needs a compilation trigger installed (lazy mode).
   /// Pure virtual on purpose: a wrong default would silently disable lazy

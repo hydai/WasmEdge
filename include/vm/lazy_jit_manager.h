@@ -55,7 +55,12 @@ public:
   /// Idempotent for an already-tracked ID: the existing dylib is reused (a
   /// re-instantiated or re-registered instance upgrades its FunctionInstances on
   /// demand). discardState() untracks an ID so a later prepare() rebuilds it.
-  Expect<void> prepare(AST::Module &Module) noexcept;
+  /// When \p PreAllocated is provided, the manager adopts it instead of copying
+  /// the module — this avoids a redundant deep copy when the caller already
+  /// allocated the module on the heap.
+  Expect<void>
+  prepare(AST::Module &Module,
+          std::shared_ptr<AST::Module> PreAllocated = nullptr) noexcept;
 
   /// Compile the function and its statically-reachable batch on first use. A
   /// no-op when already compiled, an import, or the module is untracked. The
@@ -80,6 +85,7 @@ private:
   struct TrackedModule {
     LLVM::LazyJITState JIT;
     std::shared_ptr<const AST::Module> ASTModule;
+    uint32_t ImportFuncCount = 0;
     /// Memoized static call-graph closures keyed by local function index. A
     /// seed's closure never changes, so re-instantiated and sibling instances
     /// reuse it instead of re-walking the call graph. Bounded by the module's

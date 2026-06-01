@@ -83,7 +83,8 @@ void collectReachableClosure(uint32_t LocalSeed, const AST::Module *ModulePtr,
 
 } // namespace
 
-Expect<void> LazyJitManager::prepare(AST::Module &Module) noexcept {
+Expect<void> LazyJitManager::prepare(
+    AST::Module &Module, std::shared_ptr<AST::Module> PreAllocated) noexcept {
   if (Module.getID().empty()) {
     // A module with no ID cannot be tracked: the ID keys per-module state and
     // the JIT symbol prefix ("m{ID}_"), so distinct empty-ID modules would all
@@ -128,17 +129,16 @@ Expect<void> LazyJitManager::prepare(AST::Module &Module) noexcept {
   EXPECTED_TRY(auto Exec, JITEngine.load(State.LLData, true));
   State.JITLib = std::static_pointer_cast<LLVM::JITLibrary>(Exec);
 
-  EXPECTED_TRY(LoaderEngine.loadExecutable(Module, State.JITLib));
-
   TrackedModule Tracked;
   Tracked.JIT = std::move(State);
-  // Deep-copy (not alias) the module: a caller-owned module passed to
-  // registerModule(const AST::Module&) may be destroyed right after
-  // registration, and the VM retains no registered AST modules, so this
-  // snapshot is the sole AST that the lazy compileFunction() reads later.
-  // Aliasing it would be a use-after-free; the copy also isolates the manager
-  // from the symbol mutation loadExecutable() applies to the original module.
-  Tracked.ASTModule = std::make_shared<const AST::Module>(Module);
+  if (PreAllocated) {
+    Tracked.ASTModule = std::move(PreAllocated);
+  } else {
+    Tracked.ASTModule = std::make_shared<const AST::Module>(Module);
+  }
+  Tracked.ImportFuncCount = Tracked.ASTModule->getImportedFunctionCount();
+
+  EXPECTED_TRY(LoaderEngine.loadExecutable(Module, Tracked.JIT.JITLib));
 
   std::unique_lock Lock(Mutex);
   States.try_emplace(std::string(Module.getID()), std::move(Tracked));
@@ -167,7 +167,7 @@ Expect<void> LazyJitManager::compileFunction(
   std::unique_lock ModLock(*It->second.CompileMutex);
   LLVM::LazyJITState *StatePtr = &It->second.JIT;
   const AST::Module &Module = *It->second.ASTModule;
-  const uint32_t ImportFuncCount = Module.getImportedFunctionCount();
+  const uint32_t ImportFuncCount = It->second.ImportFuncCount;
   LLVM::Data *LLDataPtr = &StatePtr->LLData;
   auto *LLContextPtr = &StatePtr->LLContext;
 

@@ -215,8 +215,9 @@ Expect<void> VM::unsafeRegisterModule(std::string_view Name,
   return {};
 }
 
-Expect<void> VM::unsafeRegisterModule(std::string_view Name,
-                                      AST::Module &Module) {
+Expect<void> VM::unsafeRegisterModule(
+    std::string_view Name, AST::Module &Module,
+    std::shared_ptr<AST::Module> PreAllocated) {
   if (Stage == VMStage::Instantiated) {
     // When registering a module, the instantiated module in the store will be
     // reset. Therefore the instantiation should restart.
@@ -227,7 +228,7 @@ Expect<void> VM::unsafeRegisterModule(std::string_view Name,
 
   std::string ID = Module.getID();
 
-  EXPECTED_TRY(Strategy->onModuleRegistered(Module));
+  EXPECTED_TRY(Strategy->onModuleRegistered(Module, std::move(PreAllocated)));
 
   // Instantiate and register module.
   auto RegResult = ExecutorEngine.registerModule(StoreRef, Module, Name);
@@ -373,7 +374,8 @@ VM::unsafeRunWasmFile(const AST::Component::Component &Component,
 Expect<std::vector<std::pair<ValVariant, ValType>>>
 VM::unsafeRunWasmFile(AST::Module &Module, std::string_view Func,
                       Span<const ValVariant> Params,
-                      Span<const ValType> ParamTypes) {
+                      Span<const ValType> ParamTypes,
+                      std::shared_ptr<AST::Module> PreAllocated) {
   if (Stage == VMStage::Instantiated) {
     // When running another module, the instantiated module in the store will
     // be reset. Therefore the instantiation should restart.
@@ -385,7 +387,8 @@ VM::unsafeRunWasmFile(AST::Module &Module, std::string_view Func,
   }
   EXPECTED_TRY(ValidatorEngine.validate(Module));
   std::string NewModID(Module.getID());
-  EXPECTED_TRY(Strategy->onModuleInstantiated(Module));
+  EXPECTED_TRY(
+      Strategy->onModuleInstantiated(Module, std::move(PreAllocated)));
   auto InstResult = ExecutorEngine.instantiateModule(StoreRef, Module);
   if (!InstResult) {
     discardOrphanedModuleState(NewModID);
@@ -776,14 +779,18 @@ Expect<void> VM::ensureCompiled(
   if (!ModInst) {
     return {};
   }
-  // Delegate to the strategy, which resolves the AST module from its own
-  // per-module state under its own lock. ModInst is VM-owned storage; reading it
-  // here is safe because every execution path that reaches this point (including
-  // the executor's compiled-call callbacks) holds a shared lock on VM::Mutex,
-  // which excludes the unique-lock unregister/instantiate paths that could
-  // destroy the instance. The shared lock does not serialize executions against
-  // each other; the lazy compilation they trigger is serialized separately by
-  // the LazyJitManager's own lock.
+  // SAFETY: ModInst is VM-owned storage (ActiveModInst or RegModInsts). Reading
+  // it here is safe only when a shared lock on VM::Mutex is held, which excludes
+  // the unique-lock unregister/instantiate/cleanup paths that could destroy the
+  // instance. All VM public execute methods (execute, asyncExecute,
+  // executeComponent) hold VM::Mutex in shared mode for their entire duration,
+  // including the executor callbacks that reach this function.
+  //
+  // WARNING: callers who obtain the executor via getExecutor() or the C API
+  // WasmEdge_VMGetExecutorContext and invoke it directly MUST NOT do so
+  // concurrently with module mutation on another thread. A recursive shared_lock
+  // here would deadlock (std::shared_mutex does not support recursive locking),
+  // so this function relies on the caller's lock. See getExecutor() doc.
   return Strategy->compileFunction(*ModInst, Func);
 }
 
