@@ -125,7 +125,6 @@ Expect<void> Executor::proxyCall(Runtime::StackManager &StackMgr,
                                  ValVariant *Rets) noexcept {
   const auto *FuncInst = getFuncInstByIdx(StackMgr, FuncIdx);
   assuming(FuncInst);
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
   const auto &FuncType = FuncInst->getFuncType();
   const uint32_t ParamsSize =
       static_cast<uint32_t>(FuncType.getParamTypes().size());
@@ -171,7 +170,6 @@ Expect<void> Executor::proxyCallIndirect(Runtime::StackManager &StackMgr,
   const auto *FuncInst = retrieveFuncRef(*Ref);
   assuming(FuncInst);
 
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
 
   bool IsMatch = false;
   if (FuncInst->getModule()) {
@@ -218,7 +216,6 @@ Expect<void> Executor::proxyCallRef(Runtime::StackManager &StackMgr,
     return Unexpect(ErrCode::Value::AccessNullFunc);
   }
 
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
 
   const auto &FuncType = FuncInst->getFuncType();
   const uint32_t ParamsSize =
