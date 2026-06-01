@@ -4270,6 +4270,74 @@ public:
   }
 
 private:
+  // Emit a lazy-JIT call: imported functions are called directly, while a
+  // defined function is reached through a per-function inline cache that
+  // resolves and memoizes its address on first use. \p BBPrefix names the
+  // generated basic blocks. Returns the call result.
+  LLVM::Value emitLazyCall(uint32_t FuncIndex, const AST::FunctionType &FuncType,
+                           const std::vector<LLVM::Value> &Args,
+                           std::string_view BBPrefix) noexcept {
+    if (std::get<2>(Context.Functions[FuncIndex]) == nullptr) {
+      return Builder.createCall(std::get<1>(Context.Functions[FuncIndex]), Args);
+    }
+    auto FTy = toLLVMType(LLContext, Context.ExecCtxPtrTy, FuncType);
+
+    if (Context.LazyJITCacheVars.size() <= FuncIndex) {
+      Context.LazyJITCacheVars.resize(Context.Functions.size());
+    }
+    auto &CacheVar = Context.LazyJITCacheVars[FuncIndex];
+    if (!CacheVar) {
+      CacheVar = Context.LLModule.get().addGlobal(
+          FTy.getPointerTo(), false, LLVMPrivateLinkage,
+          LLVM::Value::getConstNull(FTy.getPointerTo()), "");
+    }
+
+    auto CheckBB = LLVM::BasicBlock::create(
+        LLContext, F.Fn, fmt::format("{}.check", BBPrefix).c_str());
+    auto ResolveBB = LLVM::BasicBlock::create(
+        LLContext, F.Fn, fmt::format("{}.resolve", BBPrefix).c_str());
+    auto CallBB = LLVM::BasicBlock::create(
+        LLContext, F.Fn, fmt::format("{}.call", BBPrefix).c_str());
+
+    Builder.createBr(CheckBB);
+    Builder.positionAtEnd(CheckBB);
+
+    auto CachedPtr = Builder.createLoad(FTy.getPointerTo(), CacheVar, false);
+    CachedPtr.setAlignment(8);
+    CachedPtr.setOrdering(LLVMAtomicOrderingAcquire);
+    auto IsNull = Builder.createIsNull(CachedPtr);
+    auto IsNotNull = Builder.createLikely(Builder.createNot(IsNull));
+    Builder.createCondBr(IsNotNull, CallBB, ResolveBB);
+
+    Builder.positionAtEnd(ResolveBB);
+    auto FPtr = Builder.createCall(
+        Context.getIntrinsic(Builder,
+                             Executable::Intrinsics::kFuncGetFuncSymbol,
+                             LLVM::Type::getFunctionType(
+                                 FTy.getPointerTo(), {Context.Int32Ty}, false)),
+        {LLContext.getInt32(FuncIndex)});
+    // A defined function must resolve to compiled code here. A null result means
+    // the callee was never compiled (e.g. stale lazy-JIT state), so trap rather
+    // than call a null pointer.
+    auto ResolvedBB = LLVM::BasicBlock::create(
+        LLContext, F.Fn, fmt::format("{}.resolved", BBPrefix).c_str());
+    Builder.createCondBr(
+        Builder.createLikely(Builder.createNot(Builder.createIsNull(FPtr))),
+        ResolvedBB, getTrapBB(ErrCode::Value::LazyCompilationError));
+    Builder.positionAtEnd(ResolvedBB);
+    auto Store = Builder.createStore(FPtr, CacheVar);
+    Store.setAlignment(8);
+    Store.setOrdering(LLVMAtomicOrderingRelease);
+    Builder.createBr(CallBB);
+
+    Builder.positionAtEnd(CallBB);
+    auto FinalPtr = Builder.createPHI(FTy.getPointerTo());
+    FinalPtr.addIncoming(CachedPtr, CheckBB);
+    FinalPtr.addIncoming(FPtr, ResolvedBB);
+
+    return Builder.createCall(LLVM::FunctionCallee(FTy, FinalPtr), Args);
+  }
+
   void compileCallOp(const unsigned int FuncIndex) noexcept {
     const auto &FuncType =
         Context.CompositeTypes[std::get<0>(Context.Functions[FuncIndex])]
@@ -4286,57 +4354,7 @@ private:
 
     LLVM::Value Ret;
     if (IsLazyJIT) {
-      bool IsImport = std::get<2>(Context.Functions[FuncIndex]) == nullptr;
-      if (IsImport) {
-        Ret = Builder.createCall(Function, Args);
-      } else {
-        auto FTy = toLLVMType(LLContext, Context.ExecCtxPtrTy, FuncType);
-
-        if (Context.LazyJITCacheVars.size() <= FuncIndex) {
-          Context.LazyJITCacheVars.resize(Context.Functions.size());
-        }
-        auto &CacheVar = Context.LazyJITCacheVars[FuncIndex];
-        if (!CacheVar) {
-          CacheVar = Context.LLModule.get().addGlobal(
-              FTy.getPointerTo(), false, LLVMPrivateLinkage,
-              LLVM::Value::getConstNull(FTy.getPointerTo()), "");
-        }
-
-        auto CheckBB = LLVM::BasicBlock::create(LLContext, F.Fn, "ic.check");
-        auto ResolveBB =
-            LLVM::BasicBlock::create(LLContext, F.Fn, "ic.resolve");
-        auto CallBB = LLVM::BasicBlock::create(LLContext, F.Fn, "ic.call");
-
-        Builder.createBr(CheckBB);
-        Builder.positionAtEnd(CheckBB);
-
-        auto CachedPtr =
-            Builder.createLoad(FTy.getPointerTo(), CacheVar, false);
-        CachedPtr.setAlignment(8);
-        CachedPtr.setOrdering(LLVMAtomicOrderingAcquire);
-        auto IsNull = Builder.createIsNull(CachedPtr);
-        auto IsNotNull = Builder.createLikely(Builder.createNot(IsNull));
-        Builder.createCondBr(IsNotNull, CallBB, ResolveBB);
-
-        Builder.positionAtEnd(ResolveBB);
-        auto FPtr = Builder.createCall(
-            Context.getIntrinsic(
-                Builder, Executable::Intrinsics::kFuncGetFuncSymbol,
-                LLVM::Type::getFunctionType(FTy.getPointerTo(),
-                                            {Context.Int32Ty}, false)),
-            {LLContext.getInt32(FuncIndex)});
-        auto Store = Builder.createStore(FPtr, CacheVar);
-        Store.setAlignment(8);
-        Store.setOrdering(LLVMAtomicOrderingRelease);
-        Builder.createBr(CallBB);
-
-        Builder.positionAtEnd(CallBB);
-        auto FinalPtr = Builder.createPHI(FTy.getPointerTo());
-        FinalPtr.addIncoming(CachedPtr, CheckBB);
-        FinalPtr.addIncoming(FPtr, ResolveBB);
-
-        Ret = Builder.createCall(LLVM::FunctionCallee(FTy, FinalPtr), Args);
-      }
+      Ret = emitLazyCall(FuncIndex, FuncType, Args, "ic");
     } else {
       Ret = Builder.createCall(Function, Args);
     }
@@ -4462,57 +4480,7 @@ private:
 
     LLVM::Value Ret;
     if (IsLazyJIT) {
-      bool IsImport = std::get<2>(Context.Functions[FuncIndex]) == nullptr;
-      if (IsImport) {
-        Ret = Builder.createCall(Function, Args);
-      } else {
-        auto FTy = toLLVMType(LLContext, Context.ExecCtxPtrTy, FuncType);
-
-        if (Context.LazyJITCacheVars.size() <= FuncIndex) {
-          Context.LazyJITCacheVars.resize(Context.Functions.size());
-        }
-        auto &CacheVar = Context.LazyJITCacheVars[FuncIndex];
-        if (!CacheVar) {
-          CacheVar = Context.LLModule.get().addGlobal(
-              FTy.getPointerTo(), false, LLVMPrivateLinkage,
-              LLVM::Value::getConstNull(FTy.getPointerTo()), "");
-        }
-
-        auto CheckBB = LLVM::BasicBlock::create(LLContext, F.Fn, "rc.check");
-        auto ResolveBB =
-            LLVM::BasicBlock::create(LLContext, F.Fn, "rc.resolve");
-        auto CallBB = LLVM::BasicBlock::create(LLContext, F.Fn, "rc.call");
-
-        Builder.createBr(CheckBB);
-        Builder.positionAtEnd(CheckBB);
-
-        auto CachedPtr =
-            Builder.createLoad(FTy.getPointerTo(), CacheVar, false);
-        CachedPtr.setAlignment(8);
-        CachedPtr.setOrdering(LLVMAtomicOrderingAcquire);
-        auto IsNull = Builder.createIsNull(CachedPtr);
-        auto IsNotNull = Builder.createLikely(Builder.createNot(IsNull));
-        Builder.createCondBr(IsNotNull, CallBB, ResolveBB);
-
-        Builder.positionAtEnd(ResolveBB);
-        auto FPtr = Builder.createCall(
-            Context.getIntrinsic(
-                Builder, Executable::Intrinsics::kFuncGetFuncSymbol,
-                LLVM::Type::getFunctionType(FTy.getPointerTo(),
-                                            {Context.Int32Ty}, false)),
-            {LLContext.getInt32(FuncIndex)});
-        auto Store = Builder.createStore(FPtr, CacheVar);
-        Store.setAlignment(8);
-        Store.setOrdering(LLVMAtomicOrderingRelease);
-        Builder.createBr(CallBB);
-
-        Builder.positionAtEnd(CallBB);
-        auto FinalPtr = Builder.createPHI(FTy.getPointerTo());
-        FinalPtr.addIncoming(CachedPtr, CheckBB);
-        FinalPtr.addIncoming(FPtr, ResolveBB);
-
-        Ret = Builder.createCall(LLVM::FunctionCallee(FTy, FinalPtr), Args);
-      }
+      Ret = emitLazyCall(FuncIndex, FuncType, Args, "rc");
     } else {
       Ret = Builder.createCall(Function, Args);
     }
@@ -6105,6 +6073,13 @@ Expect<void> Compiler::optimize(LLVM::Module &LLModule,
   return {};
 }
 
+void Compiler::compileCoreSections(const AST::Module &Module) noexcept {
+  compile(Module.getImportSection());
+  compile(Module.getGlobalSection());
+  compile(Module.getMemorySection(), Module.getDataSection());
+  compile(Module.getTableSection(), Module.getElementSection());
+}
+
 Expect<Data> Compiler::compile(const AST::Module &Module) noexcept {
   // Check that the module is validated.
   if (unlikely(!Module.getIsValidated())) {
@@ -6128,14 +6103,8 @@ Expect<Data> Compiler::compile(const AST::Module &Module) noexcept {
 
   // Compile Function Types
   compile(Module.getTypeSection());
-  // Compile ImportSection
-  compile(Module.getImportSection());
-  // Compile GlobalSection
-  compile(Module.getGlobalSection());
-  // Compile MemorySection (MemorySec, DataSec)
-  compile(Module.getMemorySection(), Module.getDataSection());
-  // Compile TableSection (TableSec, ElemSec)
-  compile(Module.getTableSection(), Module.getElementSection());
+  // Compile import, global, memory, and table sections.
+  compileCoreSections(Module);
   // Compile functions in the module. (FunctionSec, CodeSec)
   EXPECTED_TRY(compile(Module.getFunctionSection(), Module.getCodeSection()));
   // Compile ExportSection.
@@ -6596,14 +6565,8 @@ LLVM::Compiler::compileInfrastructure(const AST::Module &Module,
 
   // Compile Function Types
   compile(Module.getTypeSection());
-  // Compile ImportSection
-  compile(Module.getImportSection());
-  // Compile GlobalSection
-  compile(Module.getGlobalSection());
-  // Compile MemorySection (MemorySec, DataSec)
-  compile(Module.getMemorySection(), Module.getDataSection());
-  // Compile TableSection (TableSec, ElemSec)
-  compile(Module.getTableSection(), Module.getElementSection());
+  // Compile import, global, memory, and table sections.
+  compileCoreSections(Module);
   // Create function declarations without compiling bodies
   compileFunctionDeclarations(Module.getFunctionSection(),
                               Module.getCodeSection());
@@ -6634,8 +6597,8 @@ LLVM::Compiler::compileInfrastructure(const AST::Module &Module,
           std::move(D), std::move(NewContext)}};
 }
 
-Expect<LLVM::Data>
-Compiler::compileFunctions(Data &&LLData, CompileContext *NewContext,
+Expect<void>
+Compiler::compileFunctions(Data &LLData, CompileContext *NewContext,
                            const AST::Module &Module,
                            Span<const uint32_t> LocalFuncIndices) noexcept {
   if (unlikely(!Module.getIsValidated())) {
@@ -6692,10 +6655,7 @@ Compiler::compileFunctions(Data &&LLData, CompileContext *NewContext,
   Context->compileTrap();
 
   compile(Module.getTypeSection(), true);
-  compile(Module.getImportSection());
-  compile(Module.getGlobalSection());
-  compile(Module.getMemorySection(), Module.getDataSection());
-  compile(Module.getTableSection(), Module.getElementSection());
+  compileCoreSections(Module);
 
   compileFunctionDeclarations(Module.getFunctionSection(),
                               Module.getCodeSection());
@@ -6713,7 +6673,7 @@ Compiler::compileFunctions(Data &&LLData, CompileContext *NewContext,
 
   spdlog::debug("[lazy-jit]: compile functions batch ({}) done"sv,
                 Sorted.size());
-  return Expect<Data>{std::move(LLData)};
+  return {};
 }
 
 void LLVM::Compiler::CompileContextDeleter::operator()(

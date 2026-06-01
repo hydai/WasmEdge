@@ -18,9 +18,11 @@
 #include "runtime/hostfunc.h"
 #include "runtime/instance/composite.h"
 
+#include <atomic>
 #include <memory>
 #include <numeric>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace WasmEdge {
@@ -37,8 +39,16 @@ public:
   /// Move constructor.
   FunctionInstance(FunctionInstance &&Inst) noexcept
       : CompositeBase(Inst.ModInst, Inst.TypeIdx), FuncType(Inst.FuncType),
-        Data(std::move(Inst.Data)) {
+        Data(std::move(Inst.Data)),
+        LazyCompiledSymbol(std::move(Inst.LazyCompiledSymbol)),
+        LazyCompiledCode(
+            Inst.LazyCompiledCode.load(std::memory_order_relaxed)) {
     assuming(ModInst);
+    // The moved-from instance no longer owns LazyCompiledSymbol; clear its
+    // published code pointer too so it consistently reports "not compiled"
+    // (getCompiledCodePtr() == nullptr) rather than a stale entry into code it
+    // no longer owns.
+    Inst.LazyCompiledCode.store(nullptr, std::memory_order_relaxed);
   }
   /// Constructor for native function.
   FunctionInstance(const ModuleInstance *Mod, const uint32_t TIdx,
@@ -75,9 +85,25 @@ public:
     return std::holds_alternative<WasmFunction>(Data);
   }
 
-  /// Check whether this is a compiled function.
-  bool isCompiledFunction() const noexcept {
-    return std::holds_alternative<Symbol<CompiledFunction>>(Data);
+  /// Get the executable code pointer if this function has compiled code, either
+  /// an ahead-of-time symbol or a lazily JIT-compiled entry, or nullptr if it
+  /// must run in the interpreter. The lazily-published entry is read with
+  /// acquire ordering, so this is safe to call concurrently with
+  /// unsafeUpgradeToCompiled.
+  ///
+  /// This is the single source of truth for whether the function has compiled
+  /// code, which is split between the LazyCompiledCode atomic (lazy JIT) and a
+  /// Symbol in Data (ahead-of-time). Always query through this accessor;
+  /// inspecting Data directly (e.g. holds_alternative<Symbol<CompiledFunction>>)
+  /// misses a lazily-published entry.
+  CompiledFunction *getCompiledCodePtr() const noexcept {
+    if (auto *LazyCode = LazyCompiledCode.load(std::memory_order_acquire)) {
+      return LazyCode;
+    }
+    if (std::holds_alternative<Symbol<CompiledFunction>>(Data)) {
+      return std::get<Symbol<CompiledFunction>>(Data).get();
+    }
+    return nullptr;
   }
 
   /// Check whether this is a host function.
@@ -107,24 +133,25 @@ public:
     }
   }
 
-  /// Getter for symbol.
-  auto &getSymbol() const noexcept {
-    return *std::get_if<Symbol<CompiledFunction>>(&Data);
-  }
-
   /// Getter for host function.
   HostFunctionBase &getHostFunc() const noexcept {
     return *std::get_if<std::unique_ptr<HostFunctionBase>>(&Data)->get();
   }
 
-  /// Upgrade from WasmFunction to CompiledFunction.
-  /// Must be called under synchronization that
-  /// prevents concurrent access to this function's body.
+  /// Publish lazily JIT-compiled code for this wasm function. The compiled
+  /// symbol is stored alongside the existing WasmFunction (Data is left
+  /// untouched, so the interpreter's instruction view stays valid) and the code
+  /// pointer is then published with release ordering. A concurrent reader
+  /// therefore observes either a not-yet-compiled function or a fully-published
+  /// compiled entry, never a torn state. Must be called by a single compiler
+  /// thread (serialized by the lazy JIT lock). Returns false for non-wasm
+  /// functions.
   bool unsafeUpgradeToCompiled(Symbol<CompiledFunction> Sym) noexcept {
     if (!isWasmFunction()) {
       return false;
     }
-    Data = std::move(Sym);
+    LazyCompiledSymbol = std::move(Sym);
+    LazyCompiledCode.store(LazyCompiledSymbol.get(), std::memory_order_release);
     return true;
   }
 
@@ -154,6 +181,15 @@ private:
   std::variant<WasmFunction, Symbol<CompiledFunction>,
                std::unique_ptr<HostFunctionBase>>
       Data;
+  /// Lazily JIT-compiled code, published once a wasm function is compiled on
+  /// demand. Kept separate from Data so that Data is never mutated after
+  /// construction: every variant accessor (and the interpreter's instruction
+  /// view) is then free of data races with a concurrent lazy upgrade.
+  /// LazyCompiledSymbol owns the JIT library lifetime and is written once under
+  /// the lazy JIT lock; LazyCompiledCode is the published entry, stored with
+  /// release and loaded with acquire ordering.
+  Symbol<CompiledFunction> LazyCompiledSymbol;
+  std::atomic<CompiledFunction *> LazyCompiledCode{nullptr};
   /// @}
 };
 

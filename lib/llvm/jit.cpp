@@ -205,32 +205,30 @@ JIT::add(JITLibrary &Lib, Data &D,
     return Unexpect(ErrCode::Value::LazyCompilationError);
   }
 
+  // Drop the resource tracker (and any partially-added module) on a failure
+  // after it was created, so a failed add does not leak it into the dylib.
+  auto removeTracker = [&RT]() {
+    if (auto RemoveErr = RT.remove()) {
+      spdlog::error(
+          "[lazy-jit]: failed to remove failed module from tracker: {}"sv,
+          RemoveErr.message().string_view());
+    }
+  };
+
   if (auto Err = Lib.J->addLLVMIRModuleWithRT(
           RT, OrcThreadSafeModule(LLModule.release(), TSContext))) {
     spdlog::error("[lazy-jit]: failed to add LLVM IR module: {}"sv,
                   Err.message().string_view());
+    removeTracker();
     return Unexpect(ErrCode::Value::LazyCompilationError);
   }
 
-  std::vector<WasmFunctionCodeAddress> Addresses;
-  Addresses.reserve(GlobalFuncIndices.size());
-  for (uint32_t GlobalFuncIndex : GlobalFuncIndices) {
-    const std::string SymName =
-        fmt::format("{}f{}"sv, D.getPrefix(), GlobalFuncIndex);
-    auto AddrOrErr = Lib.J->lookup<void *>(SymName.c_str());
-    if (!AddrOrErr) {
-      spdlog::error("[lazy-jit]: failed to lookup function symbol {}: {}"sv,
-                    SymName, errorToString(std::move(AddrOrErr.error())));
-      if (auto RemoveErr = RT.remove()) {
-        spdlog::error(
-            "[lazy-jit]: failed to remove failed module from tracker: {}"sv,
-            RemoveErr.message().string_view());
-      }
-      return Unexpect(ErrCode::Value::LazyCompilationError);
-    }
-    Addresses.push_back(*AddrOrErr);
+  auto Res = lookupWasmFunctionSymbols(Lib, D.getPrefix(), GlobalFuncIndices);
+  if (!Res) {
+    removeTracker();
+    return Unexpect(Res.error());
   }
-  return Addresses;
+  return std::move(*Res);
 }
 
 Expect<std::vector<WasmFunctionCodeAddress>> JIT::lookupWasmFunctionSymbols(

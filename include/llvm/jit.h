@@ -85,8 +85,6 @@ private:
 struct LazyJITState {
   /// Track which functions have been lazy-compiled.
   std::unordered_set<uint32_t> LazyCompiledFuncs;
-  /// Number of import functions (offset for local function indices).
-  uint32_t ImportFuncCount = 0;
   /// Store compiled JIT library to keep it alive
   std::shared_ptr<JITLibrary> JITLib;
   /// Per-module JIT data and context

@@ -43,6 +43,18 @@ public:
   TypeSection &getTypeSection() { return TypeSec; }
   const ImportSection &getImportSection() const { return ImportSec; }
   ImportSection &getImportSection() { return ImportSec; }
+  /// Count the imported functions (import descriptions of external type
+  /// Function). These occupy the low function indices, so the result is also
+  /// the index of the first locally-defined function.
+  uint32_t getImportedFunctionCount() const noexcept {
+    uint32_t Count = 0;
+    for (const auto &ImpDesc : ImportSec.getContent()) {
+      if (ImpDesc.getExternalType() == ExternalType::Function) {
+        ++Count;
+      }
+    }
+    return Count;
+  }
   const FunctionSection &getFunctionSection() const { return FunctionSec; }
   FunctionSection &getFunctionSection() { return FunctionSec; }
   const TableSection &getTableSection() const { return TableSec; }

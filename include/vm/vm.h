@@ -25,12 +25,7 @@
 
 #include "runtime/instance/module.h"
 #include "runtime/storemgr.h"
-
-#ifdef WASMEDGE_USE_LLVM
-#include "llvm/compiler.h"
-#include "llvm/data.h"
-#include "llvm/jit.h"
-#endif
+#include "vm/execution_strategy.h"
 
 #include <cstdint>
 #include <memory>
@@ -39,7 +34,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -47,7 +41,7 @@ namespace WasmEdge {
 namespace VM {
 
 /// VM execution flow class
-class VM {
+class VM : public Executor::CompilationTrigger {
 public:
   VM() = delete;
   VM(const Configure &Conf);
@@ -75,10 +69,15 @@ public:
     std::unique_lock Lock(Mutex);
     return unsafeRegisterModule(Name, Code);
   }
+  Expect<void> registerModule(std::string_view Name, AST::Module &Module) {
+    std::unique_lock Lock(Mutex);
+    return unsafeRegisterModule(Name, Module);
+  }
   Expect<void> registerModule(std::string_view Name,
                               const AST::Module &Module) {
     std::unique_lock Lock(Mutex);
-    return unsafeRegisterModule(Name, Module);
+    AST::Module ModCopy(Module);
+    return unsafeRegisterModule(Name, ModCopy);
   }
   Expect<void>
   registerModule(const Runtime::Instance::ModuleInstance &ModInst) {
@@ -113,11 +112,19 @@ public:
     return unsafeRunWasmFile(Code, Func, Params, ParamTypes);
   }
   Expect<std::vector<std::pair<ValVariant, ValType>>>
-  runWasmFile(const AST::Module &Module, std::string_view Func,
+  runWasmFile(AST::Module &Module, std::string_view Func,
               Span<const ValVariant> Params = {},
               Span<const ValType> ParamTypes = {}) {
     std::unique_lock Lock(Mutex);
     return unsafeRunWasmFile(Module, Func, Params, ParamTypes);
+  }
+  Expect<std::vector<std::pair<ValVariant, ValType>>>
+  runWasmFile(const AST::Module &Module, std::string_view Func,
+              Span<const ValVariant> Params = {},
+              Span<const ValType> ParamTypes = {}) {
+    std::unique_lock Lock(Mutex);
+    AST::Module ModCopy(Module);
+    return unsafeRunWasmFile(ModCopy, Func, Params, ParamTypes);
   }
 
   Async<Expect<std::vector<std::pair<ValVariant, ValType>>>>
@@ -305,16 +312,9 @@ public:
   /// Getter for statistics.
   Statistics::Statistics &getStatistics() noexcept { return Stat; }
 
-#ifdef WASMEDGE_USE_LLVM
   uint32_t getLazyCompiledFuncCount() const noexcept {
-    std::shared_lock Lock(LazyJITMutex);
-    uint32_t Count = 0;
-    for (const auto &Pair : LazyJITStates) {
-      Count += static_cast<uint32_t>(Pair.second.LazyCompiledFuncs.size());
-    }
-    return Count;
+    return Strategy->compiledFuncCount();
   }
-#endif
 
 private:
   void cleanupModInstContainer(
@@ -357,7 +357,7 @@ private:
   Expect<void> unsafeRegisterModule(std::string_view Name,
                                     Span<const Byte> Code);
   Expect<void> unsafeRegisterModule(std::string_view Name,
-                                    const AST::Module &Module);
+                                    AST::Module &Module);
   Expect<void>
   unsafeRegisterModule(std::string_view Name,
                        const Runtime::Instance::ModuleInstance &ModInst);
@@ -373,7 +373,7 @@ private:
                     Span<const ValVariant> Params = {},
                     Span<const ValType> ParamTypes = {});
   Expect<std::vector<std::pair<ValVariant, ValType>>>
-  unsafeRunWasmFile(const AST::Module &Module, std::string_view Func,
+  unsafeRunWasmFile(AST::Module &Module, std::string_view Func,
                     Span<const ValVariant> Params = {},
                     Span<const ValType> ParamTypes = {});
   Expect<std::vector<std::pair<ValVariant, ValType>>>
@@ -447,7 +447,6 @@ private:
   Statistics::Statistics Stat;
   VMStage Stage;
   mutable std::shared_mutex Mutex;
-  mutable std::shared_mutex LazyJITMutex;
   /// @}
 
   /// \name VM components.
@@ -455,6 +454,7 @@ private:
   Loader::Loader LoaderEngine;
   Validator::Validator ValidatorEngine;
   Executor::Executor ExecutorEngine;
+  std::unique_ptr<ExecutionStrategy> Strategy;
   /// @}
 
   /// \name VM Storage.
@@ -465,12 +465,8 @@ private:
   /// Active module instance.
   std::unique_ptr<Runtime::Instance::ModuleInstance> ActiveModInst;
   std::unique_ptr<Runtime::Instance::ComponentInstance> ActiveCompInst;
-  /// Registered AST modules.
-  std::vector<std::shared_ptr<const AST::Module>> RegASTModules;
   /// Registered module instances by user.
   std::vector<std::unique_ptr<Runtime::Instance::ModuleInstance>> RegModInsts;
-  /// Map from ID to the index in RegASTModules and RegModInsts.
-  std::unordered_map<std::string, std::array<size_t, 2>> RegModMap;
   /// Built-in module instances mapped to the configurations. For WASI.
   std::unordered_map<HostRegistration,
                      std::unique_ptr<Runtime::Instance::ModuleInstance>>
@@ -486,21 +482,15 @@ private:
   Runtime::StoreManager &StoreRef;
   /// @}
 
-#ifdef WASMEDGE_USE_LLVM
-  /// \name Lazy JIT.
-  /// @{
-  /// Prepare Lazy JIT infrastructure for a module.
-  Expect<WasmEdge::LLVM::LazyJITState> prepareLazyJIT(AST::Module &Module);
+  /// Ensure a function is lazily compiled before execution
+  /// (CompilationTrigger). A no-op unless lazy JIT is active.
+  Expect<void> ensureCompiled(
+      const Runtime::Instance::FunctionInstance &Func) noexcept override;
 
-  /// Lazy compile a function if lazy JIT mode is enabled and function not yet
-  /// compiled.
-  Expect<void> lazyCompileFunctions(const std::string &ID, uint32_t FuncIdx);
-
-  /// Map from module ID to its lazy JIT state
-  std::unordered_map<std::string, WasmEdge::LLVM::LazyJITState> LazyJITStates;
-
-  /// @}
-#endif
+  /// Whether any live instance (active or registered) still has module ID
+  /// \p ID, so per-ID lazy-JIT state must be kept rather than discarded when a
+  /// registration fails or a module is unregistered.
+  bool hasLiveInstanceWithID(std::string_view ID) const noexcept;
 };
 
 } // namespace VM

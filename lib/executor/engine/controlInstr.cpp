@@ -161,6 +161,7 @@ Expect<void> Executor::runCallOp(Runtime::StackManager &StackMgr,
                                  bool IsTailCall) noexcept {
   // Get Function address.
   const auto *FuncInst = getFuncInstByIdx(StackMgr, Instr.getTargetIndex());
+  EXPECTED_TRY(checkLazyCompilation(FuncInst));
   EXPECTED_TRY(auto NextPC,
                enterFunction(StackMgr, *FuncInst, PC + 1, IsTailCall));
   PC = NextPC - 1;
@@ -181,6 +182,7 @@ Expect<void> Executor::runCallRefOp(Runtime::StackManager &StackMgr,
 
   // Get Function address.
   const auto *FuncInst = retrieveFuncRef(Ref);
+  EXPECTED_TRY(checkLazyCompilation(FuncInst));
   EXPECTED_TRY(auto NextPC,
                enterFunction(StackMgr, *FuncInst, PC + 1, IsTailCall));
   PC = NextPC - 1;
@@ -249,6 +251,7 @@ Expect<void> Executor::runCallIndirectOp(Runtime::StackManager &StackMgr,
   }
 
   // Enter the function.
+  EXPECTED_TRY(checkLazyCompilation(FuncInst));
   EXPECTED_TRY(auto NextPC,
                enterFunction(StackMgr, *FuncInst, PC + 1, IsTailCall));
   PC = NextPC - 1;

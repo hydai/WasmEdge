@@ -142,7 +142,7 @@ Executor::enterFunction(Runtime::StackManager &StackMgr,
     // For host function case, the continuation will be the continuation from
     // the popped frame.
     return StackMgr.popFrame();
-  } else if (Func.isCompiledFunction()) {
+  } else if (auto *CompiledCode = Func.getCompiledCodePtr()) {
     // Compiled function case: Execute the function and jump to the
     // continuation.
 
@@ -181,8 +181,7 @@ Executor::enterFunction(Runtime::StackManager &StackMgr,
         Err = ErrCode(static_cast<ErrCategory>(Code >> 24), Code);
       } else {
         auto &Wrapper = FuncType.getSymbol();
-        Wrapper(&ExecutionContext, Func.getSymbol().get(), Args.data(),
-                Rets.data());
+        Wrapper(&ExecutionContext, CompiledCode, Args.data(), Rets.data());
       }
     } catch (const ErrCode &E) {
       Err = E;

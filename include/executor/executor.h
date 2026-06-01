@@ -22,6 +22,7 @@
 #include "common/errcode.h"
 #include "common/statistics.h"
 #include "common/types.h"
+#include "executor/compilation_trigger.h"
 #include "runtime/callingframe.h"
 #include "runtime/instance/component/component.h"
 #include "runtime/instance/module.h"
@@ -202,11 +203,9 @@ public:
   Expect<void> registerPostHostFunction(void *HostData,
                                         std::function<void(void *)> HostFunc);
 
-  /// Register a callback for lazy function compilation
-  void registerLazyCompilationCallback(
-      std::function<Expect<void>(const std::string &, const uint32_t)>
-          Callback) {
-    LazyCompilationHandler = std::move(Callback);
+  /// Register the trigger used for lazy function compilation.
+  void setCompilationTrigger(CompilationTrigger *Trigger) noexcept {
+    CompTrigger = Trigger;
   }
 
   /// Invoke a WASM function by function instance.
@@ -1148,29 +1147,20 @@ private:
   std::atomic<Runtime::Instance::MemoryInstance *> WaitingMemory = nullptr;
   /// Executor Host Function Handler
   HostFuncHandler HostFuncHelper = {};
-  /// Callback for lazy function compilation
-  std::function<Expect<void>(const std::string &, const uint32_t)>
-      LazyCompilationHandler;
+  /// Trigger for lazy function compilation (null unless lazy JIT is active).
+  CompilationTrigger *CompTrigger = nullptr;
 
-  /// Helper function for triggering lazy compilation.
-  /// XXX: Calling checkLazyCompilation in one thread while another thread calls
-  /// unsafeUpgradeToCompiled on the same FuncInst could result in a race
-  /// condition if checking FuncInst->isCompiledFunction() directly here. As a
-  /// temporary workaround, checks for compilation state are deferred to the
-  /// LazyCompilationHandler (VM::lazyCompileFunctions), which executes
-  /// under a global JIT compilation lock.
+  /// Helper function for triggering lazy compilation. A wasm function only
+  /// needs compilation until its code is published, so the gate skips functions
+  /// that already have compiled code and non-wasm (host / AOT) functions. Both
+  /// checks are race-free: Data is immutable after construction and the
+  /// lazily-published code pointer is read with acquire ordering. The trigger
+  /// is null for the interpreter / AOT, making this a no-op there.
   Expect<void> checkLazyCompilation(
       const Runtime::Instance::FunctionInstance *FuncInst) const noexcept {
-    if (LazyCompilationHandler) {
-      if (const auto *TargetModInst = FuncInst->getModule()) {
-        if (auto Res = TargetModInst->getFuncIdx(FuncInst)) {
-          uint32_t TargetFuncIdx = *Res;
-          const std::string ID = TargetModInst->getID();
-          if (!ID.empty()) {
-            return LazyCompilationHandler(ID, TargetFuncIdx);
-          }
-        }
-      }
+    if (CompTrigger && FuncInst && FuncInst->isWasmFunction() &&
+        !FuncInst->getCompiledCodePtr()) {
+      return CompTrigger->ensureCompiled(*FuncInst);
     }
     return {};
   }

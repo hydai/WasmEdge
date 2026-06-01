@@ -655,25 +655,25 @@ Expect<void *> Executor::proxyTableGetFuncSymbol(
 
   EXPECTED_TRY(checkLazyCompilation(FuncInst));
 
-  if (unlikely(!FuncInst->isCompiledFunction())) {
-    return nullptr;
+  if (auto *Code = FuncInst->getCompiledCodePtr()) {
+    return Code;
   }
-  return FuncInst->getSymbol().get();
+  return nullptr;
 }
 
 Expect<void *> Executor::proxyRefGetFuncSymbol(Runtime::StackManager &,
                                                const RefVariant Ref) noexcept {
   const auto *FuncInst = retrieveFuncRef(Ref);
   assuming(FuncInst);
-  if (likely(FuncInst->isCompiledFunction())) {
-    return FuncInst->getSymbol().get();
+  if (auto *Code = FuncInst->getCompiledCodePtr()) {
+    return Code;
   }
   EXPECTED_TRY(checkLazyCompilation(FuncInst));
 
-  if (unlikely(!FuncInst->isCompiledFunction())) {
-    return nullptr;
+  if (auto *Code = FuncInst->getCompiledCodePtr()) {
+    return Code;
   }
-  return FuncInst->getSymbol().get();
+  return nullptr;
 }
 
 Expect<void *>
@@ -681,15 +681,15 @@ Executor::proxyFuncGetFuncSymbol(Runtime::StackManager &StackMgr,
                                  const uint32_t FuncIdx) noexcept {
   const auto *FuncInst = getFuncInstByIdx(StackMgr, FuncIdx);
   assuming(FuncInst);
-  if (likely(FuncInst->isCompiledFunction())) {
-    return FuncInst->getSymbol().get();
+  if (auto *Code = FuncInst->getCompiledCodePtr()) {
+    return Code;
   }
   EXPECTED_TRY(checkLazyCompilation(FuncInst));
 
-  if (unlikely(!FuncInst->isCompiledFunction())) {
-    return nullptr;
+  if (auto *Code = FuncInst->getCompiledCodePtr()) {
+    return Code;
   }
-  return FuncInst->getSymbol().get();
+  return nullptr;
 }
 
 } // namespace Executor
