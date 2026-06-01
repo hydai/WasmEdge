@@ -59,7 +59,7 @@ Executor::enterFunction(Runtime::StackManager &StackMgr,
   // This single chokepoint ensures wasm functions are compiled on-demand before
   // execution, whether called directly, indirectly, or from compiled code.
   EXPECTED_TRY(checkLazyCompilation(&Func));
-
+  auto *const CompiledCode = Func.getCompiledCodePtr();
 
   // Get the function type for the parameter and return counts.
   const auto &FuncType = Func.getFuncType();
@@ -147,7 +147,7 @@ Executor::enterFunction(Runtime::StackManager &StackMgr,
     // For host function case, the continuation will be the continuation from
     // the popped frame.
     return StackMgr.popFrame();
-  } else if (auto *CompiledCode = Func.getCompiledCodePtr()) {
+  } else if (CompiledCode) {
     // Compiled function case: Execute the function and jump to the
     // continuation.
 

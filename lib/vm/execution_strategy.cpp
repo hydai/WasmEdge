@@ -49,9 +49,7 @@ public:
   AotJitStrategy(const Configure &Conf, Loader::Loader &Loader) noexcept
       : Conf(Conf), LoaderEngine(Loader) {}
 
-  Expect<void>
-  onModuleInstantiated(AST::Module &Module,
-                       std::shared_ptr<AST::Module>) noexcept override {
+  Expect<void> eagerCompile(AST::Module &Module) noexcept {
     if (Module.getSymbol()) {
       return {};
     }
@@ -72,6 +70,18 @@ public:
     return {};
   }
 
+  Expect<void>
+  onModuleRegistered(AST::Module &Module,
+                     std::shared_ptr<AST::Module>) noexcept override {
+    return eagerCompile(Module);
+  }
+
+  Expect<void>
+  onModuleInstantiated(AST::Module &Module,
+                       std::shared_ptr<AST::Module>) noexcept override {
+    return eagerCompile(Module);
+  }
+
   bool needsModuleCopy() const noexcept override { return true; }
   bool needsCompilationTrigger() const noexcept override { return false; }
 
@@ -90,20 +100,21 @@ public:
                  "ready for production use."sv);
   }
 
-  // Registration and instantiation share one decision point: prepare(). In lazy
-  // mode a module never arrives carrying externally-compiled code, so there is
-  // nothing to skip, and prepare() is idempotent for an already-prepared module
-  // ID. Keying on the module's symbol is unreliable here because prepare() sets
-  // that symbol itself.
   Expect<void>
   onModuleRegistered(AST::Module &Module,
                      std::shared_ptr<AST::Module> PreAllocated) noexcept override {
+    if (Module.getSymbol()) {
+      return {};
+    }
     return Manager.prepare(Module, std::move(PreAllocated));
   }
 
   Expect<void>
   onModuleInstantiated(AST::Module &Module,
                        std::shared_ptr<AST::Module> PreAllocated) noexcept override {
+    if (Module.getSymbol()) {
+      return {};
+    }
     return Manager.prepare(Module, std::move(PreAllocated));
   }
 

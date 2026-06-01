@@ -170,7 +170,6 @@ Expect<void> Executor::proxyCallIndirect(Runtime::StackManager &StackMgr,
   const auto *FuncInst = retrieveFuncRef(*Ref);
   assuming(FuncInst);
 
-
   bool IsMatch = false;
   if (FuncInst->getModule()) {
     IsMatch = AST::TypeMatcher::matchType(
@@ -215,7 +214,6 @@ Expect<void> Executor::proxyCallRef(Runtime::StackManager &StackMgr,
   if (unlikely(!FuncInst)) {
     return Unexpect(ErrCode::Value::AccessNullFunc);
   }
-
 
   const auto &FuncType = FuncInst->getFuncType();
   const uint32_t ParamsSize =
