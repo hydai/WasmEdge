@@ -607,11 +607,6 @@ VM::unsafeExecute(const Runtime::Instance::ModuleInstance *ModInst,
   Runtime::Instance::FunctionInstance *FuncInst =
       ModInst->findFuncExports(Func);
 
-  // Lazy JIT: compile function on-demand if needed.
-  if (Strategy->needsCompilationTrigger() && FuncInst) {
-    EXPECTED_TRY(ensureCompiled(*FuncInst));
-  }
-
   // Execute function.
   return ExecutorEngine.invoke(FuncInst, Params, ParamTypes)
       .map_error([&ModInst, &Func](auto E) {

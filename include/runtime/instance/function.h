@@ -96,16 +96,16 @@ public:
   /// unsafeUpgradeToCompiled.
   ///
   /// This is the single source of truth for whether the function has compiled
-  /// code, which is split between the LazyCompiledCode atomic (lazy JIT) and a
-  /// Symbol in Data (ahead-of-time). Always query through this accessor;
-  /// inspecting Data directly (e.g. holds_alternative<Symbol<CompiledFunction>>)
-  /// misses a lazily-published entry.
+  /// code, which is split between a Symbol in Data (ahead-of-time) and the
+  /// LazyCompiledCode atomic (lazy JIT). The AOT variant is checked first to
+  /// avoid an atomic load on the common AOT path. Always query through this
+  /// accessor; inspecting Data directly misses a lazily-published entry.
   CompiledFunction *getCompiledCodePtr() const noexcept {
-    if (auto *LazyCode = LazyCompiledCode.load(std::memory_order_acquire)) {
-      return LazyCode;
-    }
     if (std::holds_alternative<Symbol<CompiledFunction>>(Data)) {
       return std::get<Symbol<CompiledFunction>>(Data).get();
+    }
+    if (auto *LazyCode = LazyCompiledCode.load(std::memory_order_acquire)) {
+      return LazyCode;
     }
     return nullptr;
   }
