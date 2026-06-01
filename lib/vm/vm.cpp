@@ -194,9 +194,7 @@ Expect<void> VM::unsafeRegisterModule(std::string_view Name,
   EXPECTED_TRY(std::shared_ptr<AST::Module> Module,
                LoaderEngine.parseModule(Path));
 
-  EXPECTED_TRY(unsafeRegisterModule(Name, *Module));
-
-  return {};
+  return unsafeRegisterModule(Name, *Module, Module);
 }
 
 Expect<void> VM::unsafeRegisterModule(std::string_view Name,
@@ -210,9 +208,7 @@ Expect<void> VM::unsafeRegisterModule(std::string_view Name,
   EXPECTED_TRY(std::shared_ptr<AST::Module> Module,
                LoaderEngine.parseModule(Code));
 
-  EXPECTED_TRY(unsafeRegisterModule(Name, *Module));
-
-  return {};
+  return unsafeRegisterModule(Name, *Module, Module);
 }
 
 Expect<void> VM::unsafeRegisterModule(
