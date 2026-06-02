@@ -42,7 +42,9 @@ public:
         Data(std::move(Inst.Data)),
         LazyCompiledSymbol(std::move(Inst.LazyCompiledSymbol)),
         LazyCompiledCode(
-            Inst.LazyCompiledCode.load(std::memory_order_relaxed)) {
+            Inst.LazyCompiledCode.load(std::memory_order_relaxed)),
+        LazyCompileUnavailable(
+            Inst.LazyCompileUnavailable.load(std::memory_order_relaxed)) {
     assuming(ModInst);
     // The moved-from instance no longer owns LazyCompiledSymbol; clear its
     // published code pointer too so it consistently reports "not compiled"
@@ -89,6 +91,16 @@ public:
     return std::holds_alternative<WasmFunction>(Data);
   }
 
+  /// Return the AOT-compiled code pointer (non-atomic), or nullptr if this is
+  /// not an ahead-of-time-compiled function. Use this for fast-path checks that
+  /// do not need to consult the lazy-JIT atomic.
+  CompiledFunction *getAOTCompiledCodePtr() const noexcept {
+    if (std::holds_alternative<Symbol<CompiledFunction>>(Data)) {
+      return std::get<Symbol<CompiledFunction>>(Data).get();
+    }
+    return nullptr;
+  }
+
   /// Get the executable code pointer if this function has compiled code, either
   /// an ahead-of-time symbol or a lazily JIT-compiled entry, or nullptr if it
   /// must run in the interpreter. The lazily-published entry is read with
@@ -101,13 +113,25 @@ public:
   /// avoid an atomic load on the common AOT path. Always query through this
   /// accessor; inspecting Data directly misses a lazily-published entry.
   CompiledFunction *getCompiledCodePtr() const noexcept {
-    if (std::holds_alternative<Symbol<CompiledFunction>>(Data)) {
-      return std::get<Symbol<CompiledFunction>>(Data).get();
+    if (auto *AOT = getAOTCompiledCodePtr()) {
+      return AOT;
     }
     if (auto *LazyCode = LazyCompiledCode.load(std::memory_order_acquire)) {
       return LazyCode;
     }
     return nullptr;
+  }
+
+  /// Whether lazy compilation has already been attempted for this function and
+  /// determined it cannot be compiled (module untracked, function not found,
+  /// etc.). Avoids per-call string allocation + lock overhead for functions
+  /// that will never receive compiled code. Relaxed ordering suffices: a stale
+  /// false just retries once; a stale true harmlessly skips a no-op trigger.
+  bool isLazyCompileUnavailable() const noexcept {
+    return LazyCompileUnavailable.load(std::memory_order_relaxed);
+  }
+  void markLazyCompileUnavailable() const noexcept {
+    LazyCompileUnavailable.store(true, std::memory_order_relaxed);
   }
 
   /// Check whether this is a host function.
@@ -194,6 +218,7 @@ private:
   /// release and loaded with acquire ordering.
   Symbol<CompiledFunction> LazyCompiledSymbol;
   std::atomic<CompiledFunction *> LazyCompiledCode{nullptr};
+  mutable std::atomic<bool> LazyCompileUnavailable{false};
   /// @}
 };
 

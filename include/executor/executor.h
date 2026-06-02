@@ -1151,18 +1151,32 @@ private:
   CompilationTrigger *CompTrigger = nullptr;
 
   /// Trigger lazy compilation if needed and return the compiled code pointer
-  /// (or nullptr for interpreted). Reads getCompiledCodePtr() at most twice
-  /// (before and after a real compile) instead of redundantly on every call.
+  /// (or nullptr for interpreted).
+  ///
+  /// Structured to minimize cost on the three common fast paths:
+  ///   1. AOT function  → non-atomic variant check, immediate return.
+  ///   2. Interpreter (no CompTrigger) → cheap null-pointer check, no atomic.
+  ///   3. Already-compiled lazy function → one acquire load, immediate return.
+  /// The expensive trigger path (string alloc + locks) runs only on the first
+  /// call to a not-yet-compiled wasm function in lazy-JIT mode.
   Expect<Runtime::Instance::FunctionInstance::CompiledFunction *>
   ensureLazyCompiled(
       const Runtime::Instance::FunctionInstance *FuncInst) const noexcept {
-    auto *Code = FuncInst->getCompiledCodePtr();
-    if (Code) {
-      return Code;
+    if (auto *AOT = FuncInst->getAOTCompiledCodePtr()) {
+      return AOT;
     }
-    if (CompTrigger && FuncInst->isWasmFunction()) {
+    if (!CompTrigger) {
+      return nullptr;
+    }
+    if (FuncInst->isWasmFunction() && !FuncInst->isLazyCompileUnavailable()) {
+      if (auto *Code = FuncInst->getCompiledCodePtr()) {
+        return Code;
+      }
       EXPECTED_TRY(CompTrigger->ensureCompiled(*FuncInst));
-      return FuncInst->getCompiledCodePtr();
+      if (auto *Code = FuncInst->getCompiledCodePtr()) {
+        return Code;
+      }
+      FuncInst->markLazyCompileUnavailable();
     }
     return nullptr;
   }
