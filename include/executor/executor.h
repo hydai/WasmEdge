@@ -1153,7 +1153,7 @@ private:
   /// Trigger lazy compilation if needed and return the compiled code pointer
   /// (or nullptr for interpreted).
   ///
-  /// Structured to minimize cost on the three common fast paths:
+  /// Structured to minimize cost on the common fast paths:
   ///   1. AOT function  → non-atomic variant check, immediate return.
   ///   2. Interpreter (no CompTrigger) → cheap null-pointer check, no atomic.
   ///   3. Already-compiled lazy function → one acquire load, immediate return.
@@ -1168,10 +1168,10 @@ private:
     if (!CompTrigger) {
       return nullptr;
     }
+    if (auto *Code = FuncInst->getCompiledCodePtr()) {
+      return Code;
+    }
     if (FuncInst->isWasmFunction() && !FuncInst->isLazyCompileUnavailable()) {
-      if (auto *Code = FuncInst->getCompiledCodePtr()) {
-        return Code;
-      }
       EXPECTED_TRY(CompTrigger->ensureCompiled(*FuncInst));
       if (auto *Code = FuncInst->getCompiledCodePtr()) {
         return Code;
