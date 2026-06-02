@@ -148,6 +148,10 @@ Expect<void> LazyJitManager::prepare(
 Expect<void> LazyJitManager::compileFunction(
     const Runtime::Instance::ModuleInstance &ModInst,
     const Runtime::Instance::FunctionInstance &Func) noexcept {
+  if (!Func.isWasmFunction() || Func.getCompiledCodePtr()) {
+    return {};
+  }
+
   const std::string ID = ModInst.getID();
 
   // Hold the global lock in shared mode so the States map stays alive while we
@@ -188,8 +192,7 @@ Expect<void> LazyJitManager::compileFunction(
   }
   const uint32_t LocalFuncIdx = FuncIdx - ImportFuncCount;
 
-  // If already compiled or not a Wasm function, nothing to do.
-  if (!Func.isWasmFunction() || Func.getCompiledCodePtr()) {
+  if (Func.getCompiledCodePtr()) {
     return {};
   }
 

@@ -224,7 +224,7 @@ Expect<void> VM::unsafeRegisterModule(
 
   std::string ID = Module.getID();
 
-  EXPECTED_TRY(Strategy->onModuleRegistered(Module, std::move(PreAllocated)));
+  EXPECTED_TRY(Strategy->onModuleRegistered(Module, PreAllocated));
 
   // Instantiate and register module.
   auto RegResult = ExecutorEngine.registerModule(StoreRef, Module, Name);
@@ -383,8 +383,7 @@ VM::unsafeRunWasmFile(AST::Module &Module, std::string_view Func,
   }
   EXPECTED_TRY(ValidatorEngine.validate(Module));
   std::string NewModID(Module.getID());
-  EXPECTED_TRY(
-      Strategy->onModuleInstantiated(Module, std::move(PreAllocated)));
+  EXPECTED_TRY(Strategy->onModuleInstantiated(Module, PreAllocated));
   auto InstResult = ExecutorEngine.instantiateModule(StoreRef, Module);
   if (!InstResult) {
     discardOrphanedModuleState(NewModID);

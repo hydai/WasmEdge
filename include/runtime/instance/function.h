@@ -95,8 +95,8 @@ public:
   /// not an ahead-of-time-compiled function. Use this for fast-path checks that
   /// do not need to consult the lazy-JIT atomic.
   CompiledFunction *getAOTCompiledCodePtr() const noexcept {
-    if (std::holds_alternative<Symbol<CompiledFunction>>(Data)) {
-      return std::get<Symbol<CompiledFunction>>(Data).get();
+    if (auto *Sym = std::get_if<Symbol<CompiledFunction>>(&Data)) {
+      return Sym->get();
     }
     return nullptr;
   }
@@ -116,6 +116,10 @@ public:
     if (auto *AOT = getAOTCompiledCodePtr()) {
       return AOT;
     }
+    return getLazyCompiledCodePtr();
+  }
+
+  CompiledFunction *getLazyCompiledCodePtr() const noexcept {
     if (auto *LazyCode = LazyCompiledCode.load(std::memory_order_acquire)) {
       return LazyCode;
     }

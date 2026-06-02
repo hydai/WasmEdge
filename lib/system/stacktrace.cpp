@@ -120,7 +120,8 @@ Span<const uint32_t> compiledStackTrace(const Runtime::StackManager &StackMgr,
     const auto FuncInsts = Module->getFunctionInstances();
     for (size_t I = 0; I < FuncInsts.size(); ++I) {
       const auto &Func = FuncInsts[I];
-      if (Func && Func->getCompiledCodePtr()) {
+      auto *Code = Func ? Func->getCompiledCodePtr() : nullptr;
+      if (Code) {
         if (!Func->isWasmFunction()) {
           // AOT: code and wrapper are co-located in the same LLVM module, so
           // the wrapper address is a valid upper-bound sentinel.
@@ -131,7 +132,7 @@ Span<const uint32_t> compiledStackTrace(const Runtime::StackManager &StackMgr,
         // Lazy-JIT: code comes from a batch dylib and the wrapper from the
         // infrastructure dylib — independent allocations with no address
         // ordering guarantee. Omit the sentinel to avoid corrupting the map.
-        Funcs.emplace(Func->getCompiledCodePtr(), I);
+        Funcs.emplace(Code, I);
       }
     }
     for (auto Entry : Stack) {

@@ -1168,12 +1168,12 @@ private:
     if (!CompTrigger) {
       return nullptr;
     }
-    if (auto *Code = FuncInst->getCompiledCodePtr()) {
+    if (auto *Code = FuncInst->getLazyCompiledCodePtr()) {
       return Code;
     }
     if (FuncInst->isWasmFunction() && !FuncInst->isLazyCompileUnavailable()) {
       EXPECTED_TRY(CompTrigger->ensureCompiled(*FuncInst));
-      if (auto *Code = FuncInst->getCompiledCodePtr()) {
+      if (auto *Code = FuncInst->getLazyCompiledCodePtr()) {
         return Code;
       }
       FuncInst->markLazyCompileUnavailable();
