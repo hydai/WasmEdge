@@ -50,7 +50,7 @@ public:
                         std::string Prefix = "") noexcept;
   /// Compile multiple function bodies in one LLVM module for lazy JIT.
   /// \p LocalFuncIndices are indices of defined functions (not imports).
-  Expect<Data> compileFunctions(Data &&LLData, CompileContext *Context,
+  Expect<void> compileFunctions(Data &LLData, CompileContext *Context,
                                 const AST::Module &Module,
                                 Span<const uint32_t> LocalFuncIndices) noexcept;
 
@@ -66,6 +66,10 @@ private:
                const AST::ElementSection &ElementSection) noexcept;
   Expect<void> compile(const AST::FunctionSection &FunctionSection,
                        const AST::CodeSection &CodeSection) noexcept;
+
+  /// Compile the import, global, memory, and table sections shared by all
+  /// compile entry points.
+  void compileCoreSections(const AST::Module &Module) noexcept;
 
   void compileFunctionDeclarations(const AST::FunctionSection &FunctionSec,
                                    const AST::CodeSection &CodeSec) noexcept;
