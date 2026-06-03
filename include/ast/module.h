@@ -43,6 +43,18 @@ public:
   TypeSection &getTypeSection() { return TypeSec; }
   const ImportSection &getImportSection() const { return ImportSec; }
   ImportSection &getImportSection() { return ImportSec; }
+  /// Count the imported functions (import descriptions of external type
+  /// Function). These occupy the low function indices, so the result is also
+  /// the index of the first locally-defined function.
+  uint32_t getImportedFunctionCount() const noexcept {
+    uint32_t Count = 0;
+    for (const auto &ImpDesc : ImportSec.getContent()) {
+      if (ImpDesc.getExternalType() == ExternalType::Function) {
+        ++Count;
+      }
+    }
+    return Count;
+  }
   const FunctionSection &getFunctionSection() const { return FunctionSec; }
   FunctionSection &getFunctionSection() { return FunctionSec; }
   const TableSection &getTableSection() const { return TableSec; }
@@ -74,9 +86,11 @@ public:
     IntrSymbol = std::move(S);
   }
 
-  /// Getter and setter for validated flag.
+  /// Getter and setter for validated flag. IsValidated is mutable because it is
+  /// observation metadata (not part of the module's logical content), and the
+  /// validator takes const AST::Module& but needs to mark it validated.
   bool getIsValidated() const noexcept { return IsValidated; }
-  void setIsValidated(bool V = true) noexcept { IsValidated = V; }
+  void setIsValidated(bool V = true) const noexcept { IsValidated = V; }
 
   /// Getter and setter of ID.
   const std::string &getID() const noexcept { return ID; }
@@ -115,7 +129,7 @@ private:
 
   /// \name Validated flag.
   /// @{
-  bool IsValidated = false;
+  mutable bool IsValidated = false;
   /// @}
 
   /// \name ID.

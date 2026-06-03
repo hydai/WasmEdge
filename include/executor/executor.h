@@ -22,6 +22,7 @@
 #include "common/errcode.h"
 #include "common/statistics.h"
 #include "common/types.h"
+#include "executor/compilation_trigger.h"
 #include "runtime/callingframe.h"
 #include "runtime/instance/component/component.h"
 #include "runtime/instance/module.h"
@@ -202,12 +203,27 @@ public:
   Expect<void> registerPostHostFunction(void *HostData,
                                         std::function<void(void *)> HostFunc);
 
-  /// Register a callback for lazy function compilation
-  void registerLazyCompilationCallback(
-      std::function<Expect<void>(const std::string &, const uint32_t)>
-          Callback) {
-    LazyCompilationHandler = std::move(Callback);
+  /// Register the trigger used for lazy function compilation.
+  void setCompilationTrigger(CompilationTrigger *Trigger) noexcept {
+    CompTrigger = Trigger;
   }
+
+  /// Install the owning VM's single execution lock. invoke() holds it in shared
+  /// mode for the call's duration; the VM holds it in unique mode for the whole
+  /// of any state mutation (which is what frees module instances), so a
+  /// directly-invoked executor (getExecutor / WasmEdge_VMGetExecutorContext)
+  /// cannot run a function while its module is being freed. Null for a
+  /// standalone executor, which then performs no such serialization.
+  void setExecutionMutex(std::shared_mutex *ExecMutex) noexcept {
+    ExecutionMutex = ExecMutex;
+  }
+
+  /// Whether the calling thread already holds this executor's execution lock in
+  /// shared mode (it is inside an invoke, or a VM read entry point reached on
+  /// the same thread). The owning VM consults this to reject reentrant state
+  /// mutation — which cannot upgrade the held shared lock to unique without
+  /// self-deadlocking — and to let reentrant reads reuse the held lock.
+  bool isExecutionLockHeldByCurrentThread() const noexcept;
 
   /// Invoke a WASM function by function instance.
   Expect<std::vector<std::pair<ValVariant, ValType>>>
@@ -1148,31 +1164,42 @@ private:
   std::atomic<Runtime::Instance::MemoryInstance *> WaitingMemory = nullptr;
   /// Executor Host Function Handler
   HostFuncHandler HostFuncHelper = {};
-  /// Callback for lazy function compilation
-  std::function<Expect<void>(const std::string &, const uint32_t)>
-      LazyCompilationHandler;
+  /// Trigger for lazy function compilation (null unless lazy JIT is active).
+  CompilationTrigger *CompTrigger = nullptr;
+  /// The owning VM's single execution lock (its VM::Mutex). Held shared during
+  /// invoke(); the VM holds it unique for the whole of any state mutation. Null
+  /// for a standalone executor.
+  std::shared_mutex *ExecutionMutex = nullptr;
 
-  /// Helper function for triggering lazy compilation.
-  /// XXX: Calling checkLazyCompilation in one thread while another thread calls
-  /// unsafeUpgradeToCompiled on the same FuncInst could result in a race
-  /// condition if checking FuncInst->isCompiledFunction() directly here. As a
-  /// temporary workaround, checks for compilation state are deferred to the
-  /// LazyCompilationHandler (VM::lazyCompileFunctions), which executes
-  /// under a global JIT compilation lock.
-  Expect<void> checkLazyCompilation(
+  /// Trigger lazy compilation if needed and return the compiled code pointer
+  /// (or nullptr for interpreted).
+  ///
+  /// Structured to minimize cost on the common fast paths:
+  ///   1. AOT function  → non-atomic variant check, immediate return.
+  ///   2. Interpreter (no CompTrigger) → cheap null-pointer check, no atomic.
+  ///   3. Already-compiled lazy function → one acquire load, immediate return.
+  /// The expensive trigger path (string alloc + locks) runs only on the first
+  /// call to a not-yet-compiled wasm function in lazy-JIT mode.
+  Expect<Runtime::Instance::FunctionInstance::CompiledFunction *>
+  ensureLazyCompiled(
       const Runtime::Instance::FunctionInstance *FuncInst) const noexcept {
-    if (LazyCompilationHandler) {
-      if (const auto *TargetModInst = FuncInst->getModule()) {
-        if (auto Res = TargetModInst->getFuncIdx(FuncInst)) {
-          uint32_t TargetFuncIdx = *Res;
-          const std::string ID = TargetModInst->getID();
-          if (!ID.empty()) {
-            return LazyCompilationHandler(ID, TargetFuncIdx);
-          }
-        }
-      }
+    if (auto *AOT = FuncInst->getAOTCompiledCodePtr()) {
+      return AOT;
     }
-    return {};
+    if (!CompTrigger) {
+      return nullptr;
+    }
+    if (auto *Code = FuncInst->getLazyCompiledCodePtr()) {
+      return Code;
+    }
+    if (FuncInst->isWasmFunction() && !FuncInst->isLazyCompileUnavailable()) {
+      EXPECTED_TRY(CompTrigger->ensureCompiled(*FuncInst));
+      if (auto *Code = FuncInst->getLazyCompiledCodePtr()) {
+        return Code;
+      }
+      FuncInst->markLazyCompileUnavailable();
+    }
+    return nullptr;
   }
 };
 

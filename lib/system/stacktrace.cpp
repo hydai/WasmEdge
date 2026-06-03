@@ -83,7 +83,7 @@ interpreterStackTrace(const Runtime::StackManager &StackMgr,
     std::map<AST::InstrView::iterator, int64_t> Funcs;
     for (size_t I = 0; I < FuncInsts.size(); ++I) {
       const auto &Func = FuncInsts[I];
-      if (Func && Func->isWasmFunction()) {
+      if (Func && Func->isWasmFunction() && !Func->getCompiledCodePtr()) {
         const auto &Instrs = Func->getInstrs();
         Funcs.emplace(Instrs.end(), INT64_C(-1));
         Funcs.emplace(Instrs.begin(), I);
@@ -120,11 +120,19 @@ Span<const uint32_t> compiledStackTrace(const Runtime::StackManager &StackMgr,
     const auto FuncInsts = Module->getFunctionInstances();
     for (size_t I = 0; I < FuncInsts.size(); ++I) {
       const auto &Func = FuncInsts[I];
-      if (Func && Func->isCompiledFunction()) {
-        Funcs.emplace(
-            reinterpret_cast<void *>(Func->getFuncType().getSymbol().get()),
-            INT64_C(-1));
-        Funcs.emplace(Func->getSymbol().get(), I);
+      auto *Code = Func ? Func->getCompiledCodePtr() : nullptr;
+      if (Code) {
+        if (!Func->isWasmFunction()) {
+          // AOT: code and wrapper are co-located in the same LLVM module, so
+          // the wrapper address is a valid upper-bound sentinel.
+          Funcs.emplace(
+              reinterpret_cast<void *>(Func->getFuncType().getSymbol().get()),
+              INT64_C(-1));
+        }
+        // Lazy-JIT: code comes from a batch dylib and the wrapper from the
+        // infrastructure dylib — independent allocations with no address
+        // ordering guarantee. Omit the sentinel to avoid corrupting the map.
+        Funcs.emplace(Code, I);
       }
     }
     for (auto Entry : Stack) {

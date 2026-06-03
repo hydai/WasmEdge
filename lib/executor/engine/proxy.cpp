@@ -125,7 +125,6 @@ Expect<void> Executor::proxyCall(Runtime::StackManager &StackMgr,
                                  ValVariant *Rets) noexcept {
   const auto *FuncInst = getFuncInstByIdx(StackMgr, FuncIdx);
   assuming(FuncInst);
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
   const auto &FuncType = FuncInst->getFuncType();
   const uint32_t ParamsSize =
       static_cast<uint32_t>(FuncType.getParamTypes().size());
@@ -171,8 +170,6 @@ Expect<void> Executor::proxyCallIndirect(Runtime::StackManager &StackMgr,
   const auto *FuncInst = retrieveFuncRef(*Ref);
   assuming(FuncInst);
 
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
-
   bool IsMatch = false;
   if (FuncInst->getModule()) {
     IsMatch = AST::TypeMatcher::matchType(
@@ -217,8 +214,6 @@ Expect<void> Executor::proxyCallRef(Runtime::StackManager &StackMgr,
   if (unlikely(!FuncInst)) {
     return Unexpect(ErrCode::Value::AccessNullFunc);
   }
-
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
 
   const auto &FuncType = FuncInst->getFuncType();
   const uint32_t ParamsSize =
@@ -653,27 +648,14 @@ Expect<void *> Executor::proxyTableGetFuncSymbol(
     return Unexpect(ErrCode::Value::IndirectCallTypeMismatch);
   }
 
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
-
-  if (unlikely(!FuncInst->isCompiledFunction())) {
-    return nullptr;
-  }
-  return FuncInst->getSymbol().get();
+  return ensureLazyCompiled(FuncInst);
 }
 
 Expect<void *> Executor::proxyRefGetFuncSymbol(Runtime::StackManager &,
                                                const RefVariant Ref) noexcept {
   const auto *FuncInst = retrieveFuncRef(Ref);
   assuming(FuncInst);
-  if (likely(FuncInst->isCompiledFunction())) {
-    return FuncInst->getSymbol().get();
-  }
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
-
-  if (unlikely(!FuncInst->isCompiledFunction())) {
-    return nullptr;
-  }
-  return FuncInst->getSymbol().get();
+  return ensureLazyCompiled(FuncInst);
 }
 
 Expect<void *>
@@ -681,15 +663,7 @@ Executor::proxyFuncGetFuncSymbol(Runtime::StackManager &StackMgr,
                                  const uint32_t FuncIdx) noexcept {
   const auto *FuncInst = getFuncInstByIdx(StackMgr, FuncIdx);
   assuming(FuncInst);
-  if (likely(FuncInst->isCompiledFunction())) {
-    return FuncInst->getSymbol().get();
-  }
-  EXPECTED_TRY(checkLazyCompilation(FuncInst));
-
-  if (unlikely(!FuncInst->isCompiledFunction())) {
-    return nullptr;
-  }
-  return FuncInst->getSymbol().get();
+  return ensureLazyCompiled(FuncInst);
 }
 
 } // namespace Executor
