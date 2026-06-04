@@ -128,14 +128,12 @@ public:
   constexpr uint128(unsigned long V) noexcept : Low(V), High(0) {}
   constexpr uint128(unsigned long long V) noexcept : Low(V), High(0) {}
   constexpr uint128(int128 V) noexcept;
-  constexpr uint128(uint64_t H, uint64_t L) noexcept
-      : Low(L), High(H){}
+  constexpr uint128(uint64_t H, uint64_t L) noexcept : Low(L), High(H) {}
 
 #if defined(__x86_64__) || defined(__aarch64__) ||                             \
     (defined(__riscv) && __riscv_xlen == 64) || defined(__s390x__)
-        constexpr uint128(unsigned __int128 V) noexcept
-      : Low(static_cast<uint64_t>(V)), High(static_cast<uint64_t>(V >> 64)) {
-  }
+  constexpr uint128(unsigned __int128 V) noexcept
+      : Low(static_cast<uint64_t>(V)), High(static_cast<uint64_t>(V >> 64)) {}
 #endif
 
   constexpr operator bool() const noexcept {
@@ -395,13 +393,11 @@ public:
   constexpr int128(unsigned long V) noexcept : Low(V), High(INT64_C(0)) {}
   constexpr int128(unsigned long long V) noexcept : Low(V), High(INT64_C(0)) {}
   constexpr int128(uint128 V) noexcept;
-  constexpr int128(int64_t H, uint64_t L) noexcept
-      : Low(L), High(H){}
+  constexpr int128(int64_t H, uint64_t L) noexcept : Low(L), High(H) {}
 #if defined(__x86_64__) || defined(__aarch64__) ||                             \
     (defined(__riscv) && __riscv_xlen == 64) || defined(__s390x__)
-        constexpr int128(__int128 V) noexcept
-      : Low(static_cast<uint64_t>(V)), High(V >> 64) {
-  }
+  constexpr int128(__int128 V) noexcept
+      : Low(static_cast<uint64_t>(V)), High(V >> 64) {}
 #endif
 
   constexpr int128 &operator=(int V) noexcept { return *this = int128(V); }
@@ -554,7 +550,14 @@ using uint128_t = uint128;
 
 #include <fmt/format.h>
 
+#if FMT_VERSION >= 80000
+#define WASMEDGE_FMT_CONST const
+#else
+#define WASMEDGE_FMT_CONST
+#endif
+
 FMT_BEGIN_NAMESPACE
+#if FMT_VERSION >= 90000
 namespace detail {
 inline constexpr bool operator>=(detail::uint128_fallback LHS,
                                  unsigned int RHS) {
@@ -668,7 +671,9 @@ FMT_CONSTEXPR20 inline int count_digits(detail::uint128_fallback N) {
 }
 
 } // namespace detail
+#endif
 
+#if FMT_VERSION >= 80000
 template <typename Char> struct formatter<WasmEdge::uint128, Char> {
 private:
   detail::dynamic_format_specs<Char> Specs;
@@ -713,4 +718,100 @@ public:
 #endif
   }
 };
+#else
+template <typename Char> struct formatter<WasmEdge::uint128, Char> {
+private:
+  bool Alternate = false;
+  bool ZeroPad = false;
+  unsigned int Width = 0;
+  char Type = 'd';
+
+public:
+  template <typename ParseContext>
+  constexpr auto parse(ParseContext &Ctx) -> decltype(Ctx.begin()) {
+    auto It = Ctx.begin();
+    const auto End = Ctx.end();
+    if (It != End && *It == '#') {
+      Alternate = true;
+      ++It;
+    }
+    if (It != End && *It == '0') {
+      ZeroPad = true;
+      ++It;
+    }
+    while (It != End && *It >= '0' && *It <= '9') {
+      Width = Width * 10U + static_cast<unsigned int>(*It - '0');
+      ++It;
+    }
+    if (It != End && *It != '}') {
+      Type = static_cast<char>(*It++);
+    }
+    if (Type != 'd' && Type != 'x' && Type != 'X' && Type != 'b' &&
+        Type != 'B' && Type != 'o') {
+      throw fmt::format_error("invalid format specifier");
+    }
+    if (It != End && *It != '}') {
+      throw fmt::format_error("invalid format specifier");
+    }
+    return It;
+  }
+  template <typename FormatContext>
+  auto format(WasmEdge::uint128 V, FormatContext &Ctx) -> decltype(Ctx.out()) {
+    unsigned int Base = 10U;
+    if (Type == 'x' || Type == 'X') {
+      Base = 16U;
+    } else if (Type == 'b' || Type == 'B') {
+      Base = 2U;
+    } else if (Type == 'o') {
+      Base = 8U;
+    }
+
+    const bool IsZero = V == WasmEdge::uint128(0U);
+    const bool Upper = Type == 'X' || Type == 'B';
+    char Buf[128];
+    char *Pos = Buf + sizeof(Buf);
+    const WasmEdge::uint128 Divisor(Base);
+    do {
+      const uint64_t Digit = (V % Divisor).low();
+      *--Pos = static_cast<char>(
+          Digit < 10U ? '0' + Digit : (Upper ? 'A' : 'a') + Digit - 10U);
+      V /= Divisor;
+    } while (V != WasmEdge::uint128(0U));
+
+    char Prefix[2];
+    unsigned int PrefixLen = 0U;
+    if (Alternate && Base == 16U) {
+      Prefix[PrefixLen++] = '0';
+      Prefix[PrefixLen++] = Upper ? 'X' : 'x';
+    } else if (Alternate && Base == 2U) {
+      Prefix[PrefixLen++] = '0';
+      Prefix[PrefixLen++] = Upper ? 'B' : 'b';
+    } else if (Alternate && Base == 8U && !IsZero) {
+      Prefix[PrefixLen++] = '0';
+    }
+
+    const auto DigitLen = static_cast<unsigned int>(Buf + sizeof(Buf) - Pos);
+    unsigned int Padding =
+        Width > PrefixLen + DigitLen ? Width - PrefixLen - DigitLen : 0U;
+    auto Out = Ctx.out();
+    if (!ZeroPad) {
+      while (Padding-- > 0U) {
+        *Out++ = static_cast<Char>(' ');
+      }
+    }
+    for (unsigned int I = 0U; I < PrefixLen; ++I) {
+      *Out++ = static_cast<Char>(Prefix[I]);
+    }
+    if (ZeroPad) {
+      while (Padding-- > 0U) {
+        *Out++ = static_cast<Char>('0');
+      }
+    }
+    for (const char *It = Pos; It != Buf + sizeof(Buf); ++It) {
+      *Out++ = static_cast<Char>(*It);
+    }
+    return Out;
+  }
+};
+#endif
 FMT_END_NAMESPACE

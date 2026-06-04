@@ -30,6 +30,12 @@ TEST(Int128Test, Int128OutputTest) {
   }
 
   {
+    const WasmEdge::uint128_t Value = 42U;
+    EXPECT_EQ(fmt::format("{:08x}"sv, WasmEdge::uint128(Value)), "0000002a");
+    EXPECT_EQ(fmt::format("{:#08x}"sv, WasmEdge::uint128(Value)), "0x00002a");
+  }
+
+  {
     const WasmEdge::uint128_t Value = WasmEdge::uint128_t(1U) << 127U;
     EXPECT_EQ(fmt::format("{}"sv, WasmEdge::uint128(Value)),
               "170141183460469231731687303715884105728");
