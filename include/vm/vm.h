@@ -19,27 +19,21 @@
 #include "common/filesystem.h"
 #include "common/types.h"
 
+#include "executor/execution_lock.h"
 #include "executor/executor.h"
 #include "loader/loader.h"
 #include "validator/validator.h"
 
 #include "runtime/instance/module.h"
 #include "runtime/storemgr.h"
-
-#ifdef WASMEDGE_USE_LLVM
-#include "llvm/compiler.h"
-#include "llvm/data.h"
-#include "llvm/jit.h"
-#endif
+#include "vm/execution_strategy.h"
 
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -47,18 +41,17 @@ namespace WasmEdge {
 namespace VM {
 
 /// VM execution flow class
-class VM {
+class VM : public Executor::CompilationTrigger {
 public:
   VM() = delete;
   VM(const Configure &Conf);
   VM(const Configure &Conf, Runtime::StoreManager &S);
   ~VM() {
-    if (ActiveModInst) {
-      auto *RawMod = ActiveModInst.release();
-      if (RawMod) {
-        RawMod->terminate();
-      }
-    }
+    // Teardown runs through the same primitives as cleanup(). Per getExecutor()'s
+    // lifetime contract the caller must ensure no borrowed executor is still
+    // running on another thread at destruction, so these run unsynchronized like
+    // any other single-threaded destructor.
+    terminateModuleInstance(ActiveModInst.release());
     cleanupModInstContainer(RegModInsts);
     cleanupModInstContainer(BuiltInModInsts);
     cleanupModInstContainer(PlugInModInsts);
@@ -68,17 +61,30 @@ public:
   /// Register wasm modules and host modules.
   Expect<void> registerModule(std::string_view Name,
                               const std::filesystem::path &Path) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeRegisterModule(Name, Path);
   }
   Expect<void> registerModule(std::string_view Name, Span<const Byte> Code) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeRegisterModule(Name, Code);
+  }
+  /// Register a module by mutable reference (zero-copy). In JIT/lazy-JIT mode
+  /// the module is mutated in place (compiled symbols are embedded via
+  /// loadExecutable). Use the const overload to leave the caller's module
+  /// untouched.
+  Expect<void> registerModule(std::string_view Name, AST::Module &Module) {
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
+    return unsafeRegisterModule(Name, Module);
   }
   Expect<void> registerModule(std::string_view Name,
                               const AST::Module &Module) {
-    std::unique_lock Lock(Mutex);
-    return unsafeRegisterModule(Name, Module);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
+    if (Strategy->needsModuleCopy()) {
+      auto ModPtr = std::make_shared<AST::Module>(Module);
+      return unsafeRegisterModule(Name, *ModPtr, std::move(ModPtr));
+    }
+    return unsafeRegisterModule(Name,
+                                const_cast<AST::Module &>(Module)); // NOLINT
   }
   Expect<void>
   registerModule(const Runtime::Instance::ModuleInstance &ModInst) {
@@ -87,13 +93,13 @@ public:
   Expect<void>
   registerModule(std::string_view Name,
                  const Runtime::Instance::ModuleInstance &ModInst) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeRegisterModule(Name, ModInst);
   }
 
   /// Unregister a named module instance.
   Expect<void> unregisterModule(std::string_view Name) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeUnregisterModule(Name);
   }
 
@@ -102,22 +108,39 @@ public:
   runWasmFile(const std::filesystem::path &Path, std::string_view Func,
               Span<const ValVariant> Params = {},
               Span<const ValType> ParamTypes = {}) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeRunWasmFile(Path, Func, Params, ParamTypes);
   }
   Expect<std::vector<std::pair<ValVariant, ValType>>>
   runWasmFile(Span<const Byte> Code, std::string_view Func,
               Span<const ValVariant> Params = {},
               Span<const ValType> ParamTypes = {}) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeRunWasmFile(Code, Func, Params, ParamTypes);
+  }
+  /// Run a wasm function from a module by mutable reference (zero-copy). In
+  /// JIT/lazy-JIT mode the module is mutated in place (compiled symbols are
+  /// embedded via loadExecutable). Use the const overload to leave the caller's
+  /// module untouched.
+  Expect<std::vector<std::pair<ValVariant, ValType>>>
+  runWasmFile(AST::Module &Module, std::string_view Func,
+              Span<const ValVariant> Params = {},
+              Span<const ValType> ParamTypes = {}) {
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
+    return unsafeRunWasmFile(Module, Func, Params, ParamTypes);
   }
   Expect<std::vector<std::pair<ValVariant, ValType>>>
   runWasmFile(const AST::Module &Module, std::string_view Func,
               Span<const ValVariant> Params = {},
               Span<const ValType> ParamTypes = {}) {
-    std::unique_lock Lock(Mutex);
-    return unsafeRunWasmFile(Module, Func, Params, ParamTypes);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
+    if (Strategy->needsModuleCopy()) {
+      auto ModPtr = std::make_shared<AST::Module>(Module);
+      return unsafeRunWasmFile(*ModPtr, Func, Params, ParamTypes,
+                               std::move(ModPtr));
+    }
+    return unsafeRunWasmFile(const_cast<AST::Module &>(Module), // NOLINT
+                             Func, Params, ParamTypes);
   }
 
   Async<Expect<std::vector<std::pair<ValVariant, ValType>>>>
@@ -149,22 +172,22 @@ public:
 
   /// Load given wasm file, wasm bytecode, or wasm module.
   Expect<void> loadWasm(const std::filesystem::path &Path) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeLoadWasm(Path);
   }
   Expect<void> loadWasm(Span<const Byte> Code) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeLoadWasm(Code);
   }
   Expect<void> loadWasm(const AST::Module &Module) {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeLoadWasm(Module);
   }
 
   /// ======= Functions can be called after the loaded stage. =======
   /// Validate loaded wasm module.
   Expect<void> validate() {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeValidate();
   }
 
@@ -173,7 +196,7 @@ public:
   /// when component-model is fully supported.
   /// Returns failure if no component is loaded.
   Expect<void> forceValidateForComponent() {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     if (Stage < VMStage::Loaded || !Comp) {
       return Unexpect(ErrCode::Value::WrongVMWorkflow);
     }
@@ -185,7 +208,7 @@ public:
   /// ======= Functions can be called after the validated stage. =======
   /// Instantiate validated wasm module.
   Expect<void> instantiate() {
-    std::unique_lock Lock(Mutex);
+    EXPECTED_TRY(auto Lock, lockExclusiveForMutation());
     return unsafeInstantiate();
   }
 
@@ -194,7 +217,7 @@ public:
   Expect<std::vector<std::pair<ValVariant, ValType>>>
   execute(std::string_view Func, Span<const ValVariant> Params = {},
           Span<const ValType> ParamTypes = {}) {
-    std::shared_lock Lock(Mutex);
+    Executor::SharedExecutionLock Lock(&Mutex);
     return unsafeExecute(Func, Params, ParamTypes);
   }
 
@@ -203,7 +226,7 @@ public:
   execute(std::string_view ModName, std::string_view Func,
           Span<const ValVariant> Params = {},
           Span<const ValType> ParamTypes = {}) {
-    std::shared_lock Lock(Mutex);
+    Executor::SharedExecutionLock Lock(&Mutex);
     return unsafeExecute(ModName, Func, Params, ParamTypes);
   }
 
@@ -212,7 +235,7 @@ public:
   executeComponent(std::string_view Func,
                    Span<const ComponentValVariant> Params = {},
                    Span<const ComponentValType> ParamTypes = {}) {
-    std::shared_lock Lock(Mutex);
+    Executor::SharedExecutionLock Lock(&Mutex);
     return unsafeExecuteComponent(Func, Params, ParamTypes);
   }
 
@@ -221,7 +244,7 @@ public:
   executeComponent(std::string_view CompName, std::string_view Func,
                    Span<const ComponentValVariant> Params = {},
                    Span<const ComponentValType> ParamTypes = {}) {
-    std::shared_lock Lock(Mutex);
+    Executor::SharedExecutionLock Lock(&Mutex);
     return unsafeExecuteComponent(CompName, Func, Params, ParamTypes);
   }
 
@@ -256,34 +279,37 @@ public:
   /// ======= Functions which are stageless. =======
   /// Clean up VM status
   void cleanup() {
-    std::unique_lock Lock(Mutex);
+    auto Lock = lockExclusiveForMutation();
+    if (!Lock) {
+      return;
+    }
     return unsafeCleanup();
   }
 
   /// Get list of callable functions and corresponding function types.
   std::vector<std::pair<std::string, const AST::FunctionType &>>
   getFunctionList() const {
-    std::shared_lock Lock(Mutex);
+    Executor::SharedExecutionLock Lock(&Mutex);
     return unsafeGetFunctionList();
   }
 
   /// Get list of callable component functions and corresponding function types.
   std::vector<std::pair<std::string, const AST::Component::FuncType &>>
   getComponentFunctionList() const {
-    std::shared_lock Lock(Mutex);
+    Executor::SharedExecutionLock Lock(&Mutex);
     return unsafeGetComponentFunctionList();
   }
 
   /// Get pre-registered module instance by configuration.
   Runtime::Instance::ModuleInstance *
   getImportModule(const HostRegistration Type) const {
-    std::shared_lock Lock(Mutex);
+    Executor::SharedExecutionLock Lock(&Mutex);
     return unsafeGetImportModule(Type);
   }
 
   /// Get current instantiated module instance.
   const Runtime::Instance::ModuleInstance *getActiveModule() const {
-    std::shared_lock Lock(Mutex);
+    Executor::SharedExecutionLock Lock(&Mutex);
     return unsafeGetActiveModule();
   }
 
@@ -300,23 +326,77 @@ public:
   Validator::Validator &getValidator() noexcept { return ValidatorEngine; }
 
   /// Getter for the executor in the VM.
+  ///
+  /// Thread safety: the VM has a single execution lock (Mutex). Every executor
+  /// call (invoke) and every VM read entry point holds it in shared mode for the
+  /// call's duration; every VM state mutation (registerModule, unregisterModule,
+  /// instantiate, runWasmFile, cleanup) holds it in unique mode for the whole
+  /// operation. A borrowed executor can therefore run concurrently with reads
+  /// and other invokes on other threads, and a mutation waits for in-flight
+  /// invokes to drain before it frees any module instance — so an in-flight call
+  /// never has its module instances, or the lazy-JIT compiled-code callbacks
+  /// that read them, freed underneath it. The caller still owns the lifetime of
+  /// any FunctionInstance* it passes in: do not invoke with a handle obtained
+  /// before a mutation that removed it.
+  ///
+  /// Lifetime contract: do not destroy the VM while a borrowed executor call is
+  /// still running on another thread. ~VM() tears down module instances without
+  /// taking the lock — the executor and the lock are themselves being destroyed
+  /// — so concurrent use during destruction is undefined.
+  ///
+  /// Reentrancy: a host function reached through a borrowed-executor invoke()
+  /// already holds the execution lock in shared mode on this thread. It may
+  /// re-enter this VM's read entry points (execute, getFunctionList, ...), which
+  /// reuse the held lock instead of re-locking. It may not re-enter a state
+  /// mutation: that would need to upgrade the held shared lock to unique, so the
+  /// call fails fast with WrongVMWorkflow rather than deadlocking.
   Executor::Executor &getExecutor() noexcept { return ExecutorEngine; }
 
   /// Getter for statistics.
   Statistics::Statistics &getStatistics() noexcept { return Stat; }
 
-#ifdef WASMEDGE_USE_LLVM
   uint32_t getLazyCompiledFuncCount() const noexcept {
-    std::shared_lock Lock(LazyJITMutex);
-    uint32_t Count = 0;
-    for (const auto &Pair : LazyJITStates) {
-      Count += static_cast<uint32_t>(Pair.second.LazyCompiledFuncs.size());
-    }
-    return Count;
+    Executor::SharedExecutionLock Lock(&Mutex);
+    return unsafeGetLazyCompiledFuncCount();
   }
-#endif
 
 private:
+  uint32_t unsafeGetLazyCompiledFuncCount() const noexcept {
+    return Strategy->compiledFuncCount();
+  }
+
+  /// Notify the strategy that a module ID has no live instances left, so
+  /// per-module state (lazy-JIT dylib, AST copy) can be discarded. Skips
+  /// empty IDs (untrackable) and IDs that still have a live instance.
+  void discardOrphanedModuleState(std::string_view ID) noexcept {
+    if (!ID.empty() && !hasLiveInstanceWithID(ID)) {
+      Strategy->onModuleOrphaned(ID);
+    }
+  }
+
+  /// Acquire the execution lock (Mutex) in unique mode for a state-mutating
+  /// entry point, rejecting a call reached reentrantly from inside an invoke or
+  /// a read on this thread (which already holds the lock in shared mode). A
+  /// std::shared_mutex cannot upgrade a shared hold to unique, so such a
+  /// reentrant mutation could never take the lock; it fails fast with
+  /// WrongVMWorkflow instead. Read entry points take the lock shared through
+  /// SharedExecutionLock, which reuses a hold the thread already has, so
+  /// reentrant reads from a host function remain allowed.
+  Expect<Executor::UniqueExecutionLock> lockExclusiveForMutation();
+
+  /// Terminate a single already-released module instance. Every state mutation
+  /// holds the execution lock in unique mode for its whole duration, so no
+  /// borrowed executor can be running a function in the instance while it is
+  /// freed; this helper takes no lock of its own. \p ModInst may be null.
+  void terminateModuleInstance(Runtime::Instance::ModuleInstance *ModInst) {
+    if (ModInst) {
+      ModInst->terminate();
+    }
+  }
+
+  /// Terminate and clear every module instance in \p Container. Like
+  /// terminateModuleInstance, this runs under the caller's unique execution lock
+  /// (or single-threaded construction/destruction), so it takes no lock itself.
   void cleanupModInstContainer(
       std::vector<std::unique_ptr<Runtime::Instance::ModuleInstance>>
           &Container) {
@@ -356,8 +436,9 @@ private:
                                     const std::filesystem::path &Path);
   Expect<void> unsafeRegisterModule(std::string_view Name,
                                     Span<const Byte> Code);
-  Expect<void> unsafeRegisterModule(std::string_view Name,
-                                    const AST::Module &Module);
+  Expect<void>
+  unsafeRegisterModule(std::string_view Name, AST::Module &Module,
+                       std::shared_ptr<AST::Module> PreAllocated = nullptr);
   Expect<void>
   unsafeRegisterModule(std::string_view Name,
                        const Runtime::Instance::ModuleInstance &ModInst);
@@ -373,9 +454,10 @@ private:
                     Span<const ValVariant> Params = {},
                     Span<const ValType> ParamTypes = {});
   Expect<std::vector<std::pair<ValVariant, ValType>>>
-  unsafeRunWasmFile(const AST::Module &Module, std::string_view Func,
+  unsafeRunWasmFile(AST::Module &Module, std::string_view Func,
                     Span<const ValVariant> Params = {},
-                    Span<const ValType> ParamTypes = {});
+                    Span<const ValType> ParamTypes = {},
+                    std::shared_ptr<AST::Module> PreAllocated = nullptr);
   Expect<std::vector<std::pair<ValVariant, ValType>>>
   unsafeRunWasmFile(const AST::Component::Component &Component,
                     std::string_view Func, Span<const ValVariant> Params = {},
@@ -446,8 +528,11 @@ private:
   const Configure Conf;
   Statistics::Statistics Stat;
   VMStage Stage;
+  /// The VM's single execution lock. Read entry points and the executor's
+  /// invoke() hold it shared; state mutations hold it unique for their whole
+  /// duration. Declared before ExecutorEngine so it outlives the executor's
+  /// pointer to it (installed via setExecutionMutex).
   mutable std::shared_mutex Mutex;
-  mutable std::shared_mutex LazyJITMutex;
   /// @}
 
   /// \name VM components.
@@ -455,6 +540,7 @@ private:
   Loader::Loader LoaderEngine;
   Validator::Validator ValidatorEngine;
   Executor::Executor ExecutorEngine;
+  std::unique_ptr<ExecutionStrategy> Strategy;
   /// @}
 
   /// \name VM Storage.
@@ -465,12 +551,8 @@ private:
   /// Active module instance.
   std::unique_ptr<Runtime::Instance::ModuleInstance> ActiveModInst;
   std::unique_ptr<Runtime::Instance::ComponentInstance> ActiveCompInst;
-  /// Registered AST modules.
-  std::vector<std::shared_ptr<const AST::Module>> RegASTModules;
   /// Registered module instances by user.
   std::vector<std::unique_ptr<Runtime::Instance::ModuleInstance>> RegModInsts;
-  /// Map from ID to the index in RegASTModules and RegModInsts.
-  std::unordered_map<std::string, std::array<size_t, 2>> RegModMap;
   /// Built-in module instances mapped to the configurations. For WASI.
   std::unordered_map<HostRegistration,
                      std::unique_ptr<Runtime::Instance::ModuleInstance>>
@@ -486,21 +568,15 @@ private:
   Runtime::StoreManager &StoreRef;
   /// @}
 
-#ifdef WASMEDGE_USE_LLVM
-  /// \name Lazy JIT.
-  /// @{
-  /// Prepare Lazy JIT infrastructure for a module.
-  Expect<WasmEdge::LLVM::LazyJITState> prepareLazyJIT(AST::Module &Module);
+  /// Ensure a function is lazily compiled before execution
+  /// (CompilationTrigger). A no-op unless lazy JIT is active.
+  Expect<void> ensureCompiled(
+      const Runtime::Instance::FunctionInstance &Func) noexcept override;
 
-  /// Lazy compile a function if lazy JIT mode is enabled and function not yet
-  /// compiled.
-  Expect<void> lazyCompileFunctions(const std::string &ID, uint32_t FuncIdx);
-
-  /// Map from module ID to its lazy JIT state
-  std::unordered_map<std::string, WasmEdge::LLVM::LazyJITState> LazyJITStates;
-
-  /// @}
-#endif
+  /// Whether any live instance (active or registered) still has module ID
+  /// \p ID, so per-ID lazy-JIT state must be kept rather than discarded when a
+  /// registration fails or a module is unregistered.
+  bool hasLiveInstanceWithID(std::string_view ID) const noexcept;
 };
 
 } // namespace VM

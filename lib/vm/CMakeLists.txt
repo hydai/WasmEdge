@@ -3,6 +3,8 @@
 
 wasmedge_add_library(wasmedgeVM
   vm.cpp
+  lazy_jit_manager.cpp
+  execution_strategy.cpp
 )
 
 target_link_libraries(wasmedgeVM

@@ -5,12 +5,18 @@
 
 #include "common/errinfo.h"
 #include "common/spdlog.h"
+#include "executor/execution_lock.h"
 #include "system/stacktrace.h"
 
 using namespace std::literals;
 
 namespace WasmEdge {
 namespace Executor {
+
+bool Executor::isExecutionLockHeldByCurrentThread() const noexcept {
+  return ExecutionMutex != nullptr &&
+         detail::isExecutionMutexHeld(ExecutionMutex);
+}
 
 /// Instantiate a WASM Module. See "include/executor/executor.h".
 Expect<std::unique_ptr<Runtime::Instance::ModuleInstance>>
@@ -114,6 +120,8 @@ Executor::invoke(const Runtime::Instance::FunctionInstance *FuncInst,
     spdlog::error(ErrCode::Value::FuncNotFound);
     return Unexpect(ErrCode::Value::FuncNotFound);
   }
+
+  SharedExecutionLock ExecGuard(ExecutionMutex);
 
   // Matching arguments and function type.
   const auto &FuncType = FuncInst->getFuncType();
@@ -223,6 +231,8 @@ Executor::invoke(const Runtime::Instance::Component::FunctionInstance *FuncInst,
     spdlog::error(ErrCode::Value::FuncNotFound);
     return Unexpect(ErrCode::Value::FuncNotFound);
   }
+
+  SharedExecutionLock ExecGuard(ExecutionMutex);
 
   // Matching arguments and function type.
   // TODO: COMPONENT - type matching.

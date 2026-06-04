@@ -55,7 +55,6 @@ Executor::enterFunction(Runtime::StackManager &StackMgr,
     spdlog::error(ErrCode::Value::Interrupted);
     return Unexpect(ErrCode::Value::Interrupted);
   }
-
   // Get the function type for the parameter and return counts.
   const auto &FuncType = Func.getFuncType();
   const uint32_t ArgsN = static_cast<uint32_t>(FuncType.getParamTypes().size());
@@ -142,7 +141,10 @@ Executor::enterFunction(Runtime::StackManager &StackMgr,
     // For host function case, the continuation will be the continuation from
     // the popped frame.
     return StackMgr.popFrame();
-  } else if (Func.isCompiledFunction()) {
+  }
+
+  EXPECTED_TRY(auto *const CompiledCode, ensureLazyCompiled(&Func));
+  if (CompiledCode) {
     // Compiled function case: Execute the function and jump to the
     // continuation.
 
@@ -181,8 +183,7 @@ Executor::enterFunction(Runtime::StackManager &StackMgr,
         Err = ErrCode(static_cast<ErrCategory>(Code >> 24), Code);
       } else {
         auto &Wrapper = FuncType.getSymbol();
-        Wrapper(&ExecutionContext, Func.getSymbol().get(), Args.data(),
-                Rets.data());
+        Wrapper(&ExecutionContext, CompiledCode, Args.data(), Rets.data());
       }
     } catch (const ErrCode &E) {
       Err = E;

@@ -19,6 +19,8 @@
 #include "common/filesystem.h"
 #include "common/span.h"
 
+#include <cassert>
+#include <cstdlib>
 #include <mutex>
 
 namespace WasmEdge::LLVM {
@@ -32,7 +34,18 @@ public:
   ~Data() noexcept;
   Data(Data &&) noexcept;
   Data &operator=(Data &&) noexcept;
-  DataContext &extract() noexcept { return *Context; }
+  DataContext &extract() noexcept {
+    // extract() returns a reference and so cannot fall back to a safe value
+    // like the other accessors; callers must hold a valid (non-moved-from)
+    // Data. A moved-from Data here is a caller bug: fail with a defined abort
+    // (assert message in debug) instead of the release-build UB that
+    // assuming() would produce when dereferencing a null Context.
+    if (!isValid()) {
+      assert(false && "LLVM::Data::extract() called on a moved-from Data");
+      std::abort();
+    }
+    return *Context;
+  }
   bool isValid() const noexcept { return static_cast<bool>(Context); }
   bool hasModule() const noexcept;
   void resetModule() noexcept;

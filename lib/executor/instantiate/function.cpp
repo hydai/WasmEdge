@@ -18,29 +18,15 @@ Expect<void> Executor::instantiate(Runtime::Instance::ModuleInstance &ModInst,
   auto TypeIdxs = FuncSec.getContent();
   auto CodeSegs = CodeSec.getContent();
 
-  if (CodeSegs.size() == 0) {
-    return {};
-  }
-  // Under interpreter mode, the module always chooses the `for` loop in the
-  // `else` case. Branching in the `for` loop might cause meaningless branch
-  // misses, so check the first item and dispatch it into different cases to
-  // reduce branch misses.
-  if (CodeSegs[0].getSymbol() != false) {
-    for (uint32_t I = 0; I < CodeSegs.size(); ++I) {
-      auto Symbol = CodeSegs[I].getSymbol();
-      ModInst.addFunc(
-          TypeIdxs[I],
-          (*ModInst.getType(TypeIdxs[I]))->getCompositeType().getFuncType(),
-          std::move(Symbol));
-    }
-  } else {
-    // Iterate through the code segments to instantiate function instances.
-    for (uint32_t I = 0; I < CodeSegs.size(); ++I) {
-      // Create and add the function instance to the module instance.
-      ModInst.addFunc(
-          TypeIdxs[I],
-          (*ModInst.getType(TypeIdxs[I]))->getCompositeType().getFuncType(),
-          CodeSegs[I].getLocals(), CodeSegs[I].getExpr().getInstrs());
+  for (uint32_t I = 0; I < CodeSegs.size(); ++I) {
+    auto Symbol = CodeSegs[I].getSymbol();
+    const auto &FuncType =
+        (*ModInst.getType(TypeIdxs[I]))->getCompositeType().getFuncType();
+    if (Symbol != false) {
+      ModInst.addFunc(TypeIdxs[I], FuncType, std::move(Symbol));
+    } else {
+      ModInst.addFunc(TypeIdxs[I], FuncType, CodeSegs[I].getLocals(),
+                      CodeSegs[I].getExpr().getInstrs());
     }
   }
   return {};

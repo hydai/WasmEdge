@@ -68,9 +68,11 @@ public:
   std::vector<Section> &getSections() noexcept { return Secs; }
   Span<const Section> getSections() const noexcept { return Secs; }
 
-  /// Getter and setter for validated flag.
+  /// Getter and setter for validated flag. IsValidated is mutable because it
+  /// is observation metadata, and the validator takes const Component& but
+  /// needs to mark it validated.
   bool getIsValidated() const noexcept { return IsValidated; }
-  void setIsValidated(bool V = true) noexcept { IsValidated = V; }
+  void setIsValidated(bool V = true) const noexcept { IsValidated = V; }
 
 private:
   /// \name Data of Component node.
@@ -83,7 +85,7 @@ private:
 
   /// \name Validated flag.
   /// @{
-  bool IsValidated = false;
+  mutable bool IsValidated = false;
   /// @}
 };
 
